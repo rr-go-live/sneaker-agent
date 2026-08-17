@@ -1,85 +1,111 @@
 from langchain_core.messages import HumanMessage
 
 from data.catalog import SNEAKER_CATALOG
+from database import get_out_of_stock_names
 from llm import llm
+from reasoning import split_reasoning_answer
+
+# Max catalog rows sent to the LLM — keeps prompt size manageable
+# while still giving good variety (1 668 total sneakers in catalog).
+MAX_CATALOG_SIZE = 80
 
 
 def sneaker_agent(state):
     """
     sneaker_agent
     -------------
-    Asks the LLM to pick 2-3 sneakers from the catalog that fit the user's budget.
-    The full catalog is passed to the LLM so it can choose based on budget and the
-    user's stated preferences. The LLM's picks are then validated against the real
-    catalog to prevent it from recommending sneakers that do not exist.
+    Picks 2-3 sneakers from the catalog that fit the user's budget and style.
+
+    Pre-filters the full catalog before passing to the LLM:
+      1. Drops anything above budget
+      2. Sorts by sales_this_period descending (popularity proxy)
+      3. Caps at MAX_CATALOG_SIZE entries
+
+    If critique_feedback is present in state (retry after rejection), the
+    feedback is included in the prompt so the LLM can correct its picks.
 
     Args:
-        state (AgentState): reads 'budget' and 'input'
+        state (AgentState): reads 'budget', 'input', 'critique_feedback'
 
     Returns:
-        dict: updates 'proposed_sneakers', 'output', and 'next'
+        dict: updates 'proposed_sneakers', 'output', 'next', 'reasoning'
     """
-    print("\n[sneaker_agent] Running...")
+    budget            = state.get("budget") or 500.0
+    user_input        = state.get("input", "")
+    critique_feedback = state.get("critique_feedback")
 
-    budget = state.get("budget", 0)
-    user_input = state.get("input", "")
+    # ── Filter: in budget + in stock ─────────────────────────────────────────
+    out_of_stock = get_out_of_stock_names()
 
-    # Build a plain-text list of the catalog for the LLM to read
+    candidates = [
+        (name, details)
+        for name, details in SNEAKER_CATALOG.items()
+        if details.get("retail_price", 0) <= budget
+        and name not in out_of_stock
+    ]
+
+    candidates.sort(
+        key=lambda x: x[1].get("sales_this_period", 0),
+        reverse=True,
+    )
+
+    candidates = candidates[:MAX_CATALOG_SIZE]
+
     catalog_lines = []
-    for sneaker_name, details in SNEAKER_CATALOG.items():
-        line = (
-            "  - "
-            + sneaker_name
-            + " | "
-            + details["brand"]
-            + " | "
-            + details["colorway"]
-            + " | $"
-            + str(details["retail_price"])
+    for name, d in candidates:
+        catalog_lines.append(
+            f"  - {name} | {d['brand']} | ${d['retail_price']} retail"
+            f" | ${d.get('market_value', 0)} market | {d.get('profile', '?')}-top"
         )
-        catalog_lines.append(line)
 
     catalog_text = "\n".join(catalog_lines)
 
-    print(f"[sneaker_agent] Budget available: ${budget:.2f}")
-    print("[sneaker_agent] Catalog being sent to LLM:")
-    print(catalog_text)
+    # ── Inject critique feedback on retry ────────────────────────────────────
+    feedback_block = ""
+    if critique_feedback:
+        feedback_block = f"""
+A previous selection was rejected. Reason:
+{critique_feedback}
+
+Address those issues in your new selection.
+"""
 
     response = llm.invoke([
         HumanMessage(content=f"""
 You are a sneaker expert and stylist. The user has a budget of ${budget:.2f}.
 
-Sneakers available in the catalog (name | brand | colorway | retail price):
+Available sneakers (name | brand | retail | market value | profile):
 {catalog_text}
-
+{feedback_block}
 User request: {user_input}
 
-Select 2-3 sneakers from the list above that together stay within the total budget
-and match the user's style or stated preferences. Consider brand variety.
+Pick 2-3 sneakers that together stay within the total budget, match the
+user's preferences, and offer brand variety.
 
-Return ONLY a comma-separated list of sneaker names spelled exactly as shown above.
-No explanation, no extra text.
+Respond in EXACTLY this format:
+REASONING: <2-3 sentences explaining how these picks fit the user's budget,
+style preferences, and why you chose this mix of brands. If correcting after
+rejection, say what you changed>
+ANSWER: <comma-separated list of sneaker names spelled exactly as shown>
 
-Example: Nike SB Dunk High Oski Great White, Adidas Busenitz Vintage Focus Orange
+Example:
+REASONING: Both stay under budget and lean toward the low-top, neutral look the
+user asked for, while mixing Jordan and Nike for variety.
+ANSWER: Jordan 4 Retro SB Pine Green, Nike Dunk Low Retro White Black
 """)
     ])
 
-    raw_response = response.content.strip().lower()
-    print(f"[sneaker_agent] LLM said: '{raw_response}'")
+    reasoning, answer = split_reasoning_answer(response.content)
+    raw_answer = answer.lower()
 
-    # Validate picks against the real catalog so the LLM cannot invent names
-    proposed_sneakers = []
-    for sneaker_name in SNEAKER_CATALOG:
-        if sneaker_name.lower() in raw_response:
-            proposed_sneakers.append(sneaker_name)
-
-    print(f"[sneaker_agent] Matched sneakers from catalog: {proposed_sneakers}")
-    print("[sneaker_agent] Passing picks to logistics_agent to check availability...")
-
-    sneakers_as_text = ", ".join(proposed_sneakers)
+    proposed_sneakers = [
+        name for name in SNEAKER_CATALOG
+        if name.lower() in raw_answer
+    ]
 
     return {
         "proposed_sneakers": proposed_sneakers,
-        "output": "Sneaker recommendations: " + sneakers_as_text,
-        "next": "logistics_agent",
+        "output":  "Sneaker recommendations: " + ", ".join(proposed_sneakers),
+        "next":    "critique_agent",
+        "reasoning": reasoning,
     }

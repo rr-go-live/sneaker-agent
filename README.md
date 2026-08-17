@@ -1,6 +1,6 @@
-# Sneaker Agent — Multi-Agent System with Eval Harness
+# Sneaker Agent — Multi-Agent System with React UI
 
-A multi-agent AI system built with **LangGraph** and **Gemini Flash**. Four specialized agents collaborate through shared state to handle the full sneaker shopping experience. A built-in **eval harness** scores the pipeline across six dimensions: routing accuracy, budget accuracy, sneaker validity, budget compliance, failure handling, and latency.
+A multi-agent AI system built with **LangGraph**, **Gemini Flash**, **FastAPI**, and **React**. Five specialized agents collaborate through shared state to handle the full sneaker shopping experience — routing, budgeting, inventory review, recommendation, critique, and logistics. A built-in **eval harness** scores the pipeline across six dimensions.
 
 > The eval layer is the differentiated part — most multi-agent demos stop at the agents. This one measures them.
 
@@ -8,30 +8,62 @@ A multi-agent AI system built with **LangGraph** and **Gemini Flash**. Four spec
 
 ## How it works
 
-Every request enters the **orchestrator**, which uses the LLM to route it to the right starting agent. Agents hand off to each other by writing to a shared `AgentState` TypedDict that travels through the graph.
+Every request enters the **orchestrator**, which uses the LLM to route it to the right starting agent. Agents hand off by writing to a shared `AgentState` TypedDict that travels through the graph.
 
 ```
-User request
-     │
-     ▼
-orchestrator  (LLM picks which agent handles this)
-     │
-     ├─→ financial_agent  →  sneaker_agent  →  logistics_agent  →  END
-     │
-     ├─→ inventory_agent  →  (if shopping intent) financial_agent  →  ...
-     │
-     └─→ logistics_agent  →  END
+User request (web UI or CLI eval)
+         │
+         ▼
+   orchestrator  (LLM picks which agent handles this)
+         │
+         ├─→ financial_agent → sneaker_agent → critique_agent → logistics_agent → END
+         │
+         ├─→ inventory_agent → (if shopping intent) financial_agent → ...
+         │
+         └─→ logistics_agent → END
 ```
 
-| Agent | Responsibility |
-|---|---|
-| `orchestrator` | Routes the user's request to the right first agent using the LLM |
-| `financial_agent` | Looks up the user's budget from the data catalog |
-| `sneaker_agent` | Asks the LLM to pick 2-3 catalog sneakers within budget |
-| `inventory_agent` | Summarizes owned collection; uses LLM to decide whether to continue shopping |
-| `logistics_agent` | Checks stock, shows retail vs market value, outputs StockX links |
+| Agent               | Responsibility                                                                                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `orchestrator`    | Routes the user's request to the right first agent using the LLM                                                                                         |
+| `financial_agent` | Looks up the user's budget from the database (falls back to catalog.py)                                                                                  |
+| `sneaker_agent`   | Asks the LLM to pick 2–3 catalog sneakers within budget; accepts critique feedback on retry                                                             |
+| `inventory_agent` | Reviews owned collection; uses LLM to decide whether to continue shopping                                                                                |
+| `critique_agent`  | Reviews picks against three rubrics (budget, market value, brand diversity); approves or rejects with a reason — up to 2 retries before force-approving |
+| `logistics_agent` | Checks live DB inventory, shows retail vs market value, outputs StockX links                                                                             |
 
-Sneaker data is sourced from the [purplebugs/sneakers-game](https://github.com/purplebugs/sneakers-game/blob/main/data/sneakersFromDatabase.json) dataset (15 curated entries).
+Sneaker data comes from `data/sneakerdata.json` — **1,668 real sneakers** with full StockX market data (retail price, market value, last sale, lowest ask, deadstock sold).
+
+---
+
+## Web UI
+
+A React + Vite SPA (port `5173`) with three pages:
+
+| Page              | What it does                                                                                                |
+| ----------------- | ----------------------------------------------------------------------------------------------------------- |
+| **Advisor** | Natural language input form — streams each agent step in real time and renders the final sneaker picks     |
+| **Catalog** | Browsable catalog of all 1,668 sneakers with search, brand, profile, price, and in-stock filters            |
+| **Evals**   | Runs the eval harness from the browser — streams each test case as it finishes and shows the scored report |
+
+---
+
+## API
+
+The FastAPI backend (port `8000`) exposes the following endpoints:
+
+| Method     | Path                                      | Description                                                                                     |
+| ---------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/sneakers`                         | Full catalog with optional filters (`q`, `brand`, `profile`, `max_price`, `in_stock`) |
+| `POST`   | `/api/agent`                            | Runs the agent graph — SSE stream of agent steps + final result                                |
+| `POST`   | `/api/evals/run`                        | Runs the eval harness — SSE stream of test case results + summary                              |
+| `GET`    | `/api/users`                            | List all user profiles                                                                          |
+| `GET`    | `/api/users/{username}`                 | Single user profile with full wardrobe                                                          |
+| `PUT`    | `/api/users/{username}`                 | Create or update a user's budget                                                                |
+| `POST`   | `/api/users/{username}/wardrobe`        | Add a sneaker to a user's wardrobe                                                              |
+| `DELETE` | `/api/users/{username}/wardrobe/{name}` | Remove a sneaker from a user's wardrobe                                                         |
+| `GET`    | `/api/inventory/{sneaker_name}`         | Live stock quantity for one sneaker                                                             |
+| `POST`   | `/api/inventory/purchase`               | Decrement inventory; optionally add to user's wardrobe                                          |
 
 ---
 
@@ -39,7 +71,7 @@ Sneaker data is sourced from the [purplebugs/sneakers-game](https://github.com/p
 
 The eval harness runs the agent graph against 8 test cases and scores each run on 6 dimensions.
 
-```
+```bash
 python eval_runner.py                # run all 8 test cases
 python eval_runner.py --id TC-001   # run one specific test case
 python eval_runner.py --verbose     # show agent logs during runs
@@ -47,14 +79,14 @@ python eval_runner.py --verbose     # show agent logs during runs
 
 ### Scoring Dimensions
 
-| Dimension | What it checks |
-|---|---|
-| **Routing Accuracy** | Did the orchestrator's LLM decision pick the right first agent? |
-| **Budget Accuracy** | Did financial_agent retrieve the correct dollar amount? |
-| **Sneaker Validity** | Are all proposed sneakers real catalog items? (catches LLM hallucination) |
-| **Budget Compliance** | Does the total retail price stay within the user's budget? |
-| **Failure Handling** | Does the system return a readable error instead of crashing on bad input? |
-| **Latency** | Did the full run finish under the 15-second threshold? |
+| Dimension                   | What it checks                                                            |
+| --------------------------- | ------------------------------------------------------------------------- |
+| **Routing Accuracy**  | Did the orchestrator pick the right first agent?                          |
+| **Budget Accuracy**   | Did`financial_agent` retrieve the correct dollar amount?                |
+| **Sneaker Validity**  | Are all proposed sneakers real catalog items? (catches hallucination)     |
+| **Budget Compliance** | Does the total retail price stay within the user's budget?                |
+| **Failure Handling**  | Does the system return a readable error instead of crashing on bad input? |
+| **Latency**           | Did the full run finish under the 15-second threshold?                    |
 
 ### Example Report
 
@@ -96,7 +128,8 @@ See [test_cases.md](test_cases.md) for full test case documentation and edge cas
 ## Prerequisites
 
 - Python 3.10+
-- A Google Gemini API key ([get one free here](https://aistudio.google.com/app/apikey))
+- Node.js 18+ and npm
+- A Google Gemini API key ([get one free](https://aistudio.google.com/app/apikey))
 
 ---
 
@@ -111,24 +144,39 @@ cd sneaker-agent
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
-# 3. Install dependencies
-pip install langchain-google-genai langgraph
+# 3. Install Python dependencies
+pip install langchain-google-genai langgraph fastapi uvicorn sqlalchemy pydantic
 
-# 4. Add your API key
-echo 'export GOOGLE_API_KEY="your-key-here"' > .env
-source .env
+# 4. Set your API key
+export GOOGLE_API_KEY="your-key-here"
+
+# 5. Seed the database (creates sneaker_agent.db with demo users and inventory)
+python db_init.py
+
+# 6. Install frontend dependencies
+cd frontend && npm install && cd ..
 ```
 
 ---
 
 ## Running
 
-**Demo — three hardcoded scenarios:**
+**API backend** (terminal 1):
+
 ```bash
-python main.py
+uvicorn api:app --reload
 ```
 
-**Eval — scored report across 8 test cases:**
+**React frontend** (terminal 2):
+
+```bash
+cd frontend && npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173) in your browser.
+
+**CLI eval harness** (no server required):
+
 ```bash
 python eval_runner.py
 ```
@@ -139,21 +187,25 @@ python eval_runner.py
 
 ```
 sneaker-agent/
-├── main.py                  Entry point — runs 3 demo scenarios
-├── eval_runner.py           CLI entry point for the eval harness
+├── api.py                   FastAPI app — REST + SSE endpoints
 ├── graph.py                 build_graph() — wires all agents into LangGraph
 ├── orchestrator.py          orchestrator() + router() — LLM routing logic
 ├── state.py                 AgentState TypedDict shared across all agents
 ├── llm.py                   Shared Gemini Flash LLM instance
+├── database.py              SQLAlchemy models + helpers (SQLite)
+├── db_init.py               Seeds demo users and store inventory on first run
+├── eval_runner.py           CLI entry point for the eval harness
 │
 ├── agents/
-│   ├── financial_agent.py   Looks up user budget
-│   ├── sneaker_agent.py     LLM picks 2-3 sneakers within budget
-│   ├── inventory_agent.py   Reviews collection; decides whether to shop
-│   └── logistics_agent.py   Checks stock, retail vs market price, StockX links
+│   ├── financial_agent.py   Budget lookup (DB → catalog fallback)
+│   ├── sneaker_agent.py     LLM picks 2–3 sneakers; handles critique retry feedback
+│   ├── inventory_agent.py   Wardrobe lookup; decides whether to continue shopping
+│   ├── critique_agent.py    Validates picks (budget, value, diversity); approve/reject loop
+│   └── logistics_agent.py   Live DB inventory check; retail vs market; StockX links
 │
 ├── data/
-│   └── catalog.py           USER_BUDGETS, USER_SNEAKER_COLLECTION, SNEAKER_CATALOG
+│   ├── catalog.py           Loads sneakerdata.json → SNEAKER_CATALOG dict
+│   └── sneakerdata.json     1,668 sneakers with full StockX market data
 │
 ├── evals/
 │   ├── cases.py             8 test case definitions with expected outcomes
@@ -161,8 +213,22 @@ sneaker-agent/
 │   ├── runner.py            Streams cases through graph, captures per-node results
 │   └── report.py            Formats and prints the scored eval report
 │
-├── architecture/
-│   └── diagram.md           Full system architecture diagram
+├── frontend/                React + Vite SPA
+│   └── src/
+│       ├── pages/
+│       │   ├── Advisor.jsx  AI recommendation form + live pipeline visualization
+│       │   ├── Catalog.jsx  Filterable sneaker catalog with purchase flow
+│       │   └── Evals.jsx    Browser-based eval runner with live scoring
+│       ├── components/
+│       │   ├── FilterBar.jsx     Search and filter controls
+│       │   ├── LogPane.jsx       Agent step log with per-step LLM reasoning
+│       │   ├── Nav.jsx           Top navigation bar
+│       │   ├── SneakerCard.jsx   Flip card with purchase flow
+│       │   └── SneakerPicker.jsx Wardrobe item selector
+│       └── utils/
+│           └── colors.js    Colorway → CSS color mapping
+│
+├── cli_test.py              CLI test harness (run: python cli_test.py)
 └── test_cases.md            Test case documentation with edge cases
 ```
 
@@ -170,16 +236,33 @@ sneaker-agent/
 
 ## Architecture
 
-See [architecture/diagram.md](architecture/diagram.md) for the full system diagram including agent routing paths, data flow, and technology choices.
+High-level end-to-end data flow:
+
+```
+Browser (React / Vite)
+    │  HTTP / SSE
+    ▼
+FastAPI (api.py)
+    │
+    ▼
+LangGraph Agent Graph
+  orchestrator → financial_agent → sneaker_agent → critique_agent → logistics_agent
+                 inventory_agent ↗                 ↺ retry (max 2)
+    │
+    ▼
+SQLite Database (database.py)
+  users · wardrobe_items · sneaker_inventory
+    │
+    ▼
+data/sneakerdata.json  —  1,668 sneakers · StockX market data
+```
 
 ---
 
 ## Modifying Test Data
 
-All static data lives in [data/catalog.py](data/catalog.py):
+**Catalog** — all sneaker data lives in [data/sneakerdata.json](data/sneakerdata.json). Add or edit entries directly; `catalog.py` loads it at import time.
 
-- **Add a user**: add an entry to `USER_BUDGETS` and `USER_SNEAKER_COLLECTION`
-- **Change a budget**: update the dollar value in `USER_BUDGETS`
-- **Edit the catalog**: add or modify entries in `SNEAKER_CATALOG`
+**User profiles** — demo users (`john`, `alice`, `demo`) are seeded by `db_init.py` into `sneaker_agent.db`. To reset or change them, edit the `SEED_USERS` list in [db_init.py](db_init.py) and delete `sneaker_agent.db`, then re-run `python db_init.py`.
 
-To add a new eval test case, append a dict to `TEST_CASES` in [evals/cases.py](evals/cases.py) following the existing schema.
+**Eval test cases** — append a dict to `TEST_CASES` in [evals/cases.py](evals/cases.py) following the existing schema.

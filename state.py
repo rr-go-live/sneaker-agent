@@ -1,4 +1,4 @@
-from typing import TypedDict
+from typing import Optional, TypedDict
 
 
 class AgentState(TypedDict):
@@ -10,13 +10,21 @@ class AgentState(TypedDict):
     with only the fields it updated. LangGraph merges that dict back in.
 
     Fields:
-        input              (str):   the original user question — never modified after start
-        user_name          (str):   which user is asking — never modified after start
-        next               (str):   which agent to run next; every agent must set this
-        output             (str):   the human-readable result produced by the last agent
-        budget             (float): set by financial_agent; how much the user can spend
-        proposed_sneakers  (list):  set by sneaker_agent; sneaker names chosen within budget
-        sneaker_collection (list):  set by inventory_agent; sneakers the user already owns
+        input              (str):          the original user question
+        user_name          (str):          which user is asking
+        next               (str):          which agent to run next
+        output             (str):          human-readable result of the last agent
+        budget             (float):        set by financial_agent
+        proposed_sneakers  (list[str]):    set by sneaker_agent
+        sneaker_collection (list[str]):    set by inventory_agent
+        critique_feedback  (str|None):     rejection reason from critique_agent;
+                                           injected into sneaker_agent on retry
+        critique_attempts  (int):          number of critique cycles completed;
+                                           capped at MAX_CRITIQUE_ATTEMPTS in critique_agent
+        reasoning          (str|None):     plain-English explanation of WHY the
+                                           agent that just ran made its decision;
+                                           streamed to the UI logging panel so the
+                                           user can follow the LLM's logic
     """
     input:              str
     user_name:          str
@@ -25,3 +33,6 @@ class AgentState(TypedDict):
     budget:             float
     proposed_sneakers:  list
     sneaker_collection: list
+    critique_feedback:  Optional[str]
+    critique_attempts:  int
+    reasoning:          Optional[str]

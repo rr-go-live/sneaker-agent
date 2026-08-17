@@ -1,7 +1,14 @@
-# Test Cases — Sneaker Agent Eval Harness
+# Test Cases — Sneaker Agent
 
-Run the full suite: `python eval_runner.py`
-Run a single case: `python eval_runner.py --id TC-001`
+This project has two complementary test layers:
+
+1. **CLI test harness** ([`cli_test.py`](cli_test.py)) — fast structural and
+   integration checks (parser, API routes, database, and one full pipeline
+   run). Run it with `python cli_test.py`. See
+   [CLI Test Harness](#cli-test-harness-cli_testpy) below.
+2. **Eval harness** — quality scoring of the multi-agent routing and picks
+   across realistic prompts. Run the full suite with `python eval_runner.py`
+   or a single case with `python eval_runner.py --id TC-001`.
 
 ---
 
@@ -147,3 +154,82 @@ Run a single case: `python eval_runner.py --id TC-001`
 - **Budget Compliance drops** — sneaker_agent is selecting picks that exceed the user's budget; prompt refinement needed
 - **Failure Handling drops** — an error path is crashing instead of returning a message; check agent error handling
 - **Latency drops** — LLM API is slow; check model tier or reduce prompt length
+
+---
+
+# CLI Test Harness (`cli_test.py`)
+
+Fast, mostly-offline checks that confirm the app's building blocks work.
+Run with `python cli_test.py`. Exits `0` when everything passes or is
+skipped, `1` on any failure (CI-friendly). Cases that make live Gemini
+calls are skipped automatically when no `GOOGLE_API_KEY` is configured, and
+a dummy key is injected so the offline cases can still import the API.
+
+## 1. Reasoning parser (`reasoning.split_reasoning_answer`)
+
+The LLM agents return their thinking and their machine-readable answer in a
+single `REASONING: … / ANSWER: …` response. The parser splits the two.
+
+| # | Input | Expected output | Edge case covered |
+|---|-------|-----------------|-------------------|
+| 1.1 | `"REASONING: because.\nANSWER: financial_agent"` | `("because.", "financial_agent")` | Well-formed, multi-line |
+| 1.2 | `"ANSWER: sneaker_agent"` | `("", "sneaker_agent")` | Reasoning label omitted |
+| 1.3 | `"financial_agent"` | `("", "financial_agent")` | No labels — backwards-compatible fallback so routing never breaks |
+| 1.4 | `"reasoning: lower\nanswer: done"` | `("lower", "done")` | Lowercase labels |
+| 1.5 | `""` | `("", "")` | Empty / null input does not raise |
+
+## 2. Catalog filter endpoint (`GET /api/sneakers`)
+
+| # | Input | Expected output | Edge case covered |
+|---|-------|-----------------|-------------------|
+| 2.1 | `?q=panda` | HTTP 200, JSON list | Query touches entries with **no `colorway` key** — previously threw `KeyError` (500) |
+| 2.2 | `?q=panda` (rows present) | Each row contains a `name` field | Response shape is stable for the frontend |
+| 2.3 | `?max_price=120` | HTTP 200, every row `retail_price <= 120` | Numeric filter correctness |
+
+Related safety handled in `api.py`: entries missing `brand`, `retail_price`,
+or `in_stock` are treated as empty/absent instead of crashing the request.
+
+## 3. User profile routes (`/api/users`)
+
+| # | Input | Expected output | Edge case covered |
+|---|-------|-----------------|-------------------|
+| 3.1 | `GET /api/users` | HTTP 200, JSON list | Works whether or not users are seeded |
+| 3.2 | `GET /api/users/definitely-not-a-real-user-xyz` | HTTP 404 | Unknown username rejected cleanly |
+| 3.3 | `GET /api/users/{seeded}` | HTTP 200, `wardrobe` is a list | Known user returns a wardrobe (skipped if none seeded) |
+
+## 4. Database helpers (`database.py`)
+
+| # | Input | Expected output | Edge case covered |
+|---|-------|-----------------|-------------------|
+| 4.1 | `init_db()` | No error | Idempotent — safe when tables already exist |
+| 4.2 | `get_sneaker_quantity(name)` | Non-negative `int` | Valid count for known/unknown sneaker |
+| 4.3 | `get_out_of_stock_names()` | Python `set` | Stable return type for downstream filtering |
+
+## 5. Full multi-agent pipeline (`graph.build_graph`)
+
+Runs a complete buying request through the graph
+(orchestrator → financial → sneaker → critique → logistics).
+
+**Input:**
+```python
+{
+  "input": "I want a clean white low-top for everyday wear that holds resale value",
+  "user_name": "cli_test_user",
+  "budget": 300.0,
+}
+```
+
+| # | Expected output | Edge case covered |
+|---|-----------------|-------------------|
+| 5.1 | Visits `orchestrator` and `sneaker_agent` | Routing works for shopping intent |
+| 5.2 | **Every** node emits non-empty `reasoning` | Powers the Logging tab's step-by-step LLM reasoning |
+| 5.3 | `proposed_sneakers` has ≥ 1 pick | Sneaker agent produces output |
+| 5.4 | Total retail of picks ≤ `budget` | Budget compliance enforced end to end |
+
+**Skip condition:** reported `SKIP` when no real `GOOGLE_API_KEY` is set,
+since it makes live Gemini calls. The harness still exits successfully.
+
+## Maintenance
+
+Update this file and `cli_test.py` together whenever a feature is added or a
+route changes, so the documented coverage stays in sync with the harness.

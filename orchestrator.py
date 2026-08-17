@@ -1,6 +1,7 @@
 from langchain_core.messages import HumanMessage
 
 from llm import llm
+from reasoning import split_reasoning_answer
 
 
 def orchestrator(state):
@@ -23,11 +24,9 @@ def orchestrator(state):
         state (AgentState): reads 'input'
 
     Returns:
-        dict: sets 'next' to the name of the first agent to run
+        dict: sets 'next' to the name of the first agent to run, plus
+              'reasoning' explaining why that agent was chosen
     """
-    print("\n[orchestrator] User input received: " + state["input"])
-    print("[orchestrator] Asking LLM which agent should handle this...")
-
     user_input = state["input"]
 
     decision = llm.invoke([
@@ -43,15 +42,16 @@ Agents:
 
 User input: {user_input}
 
-Return ONLY one of these four exact strings:
-financial_agent, sneaker_agent, inventory_agent, logistics_agent
+Respond in EXACTLY this format:
+REASONING: <2-3 sentences explaining which intent you detected in the user's
+message and why it maps to the agent you chose>
+ANSWER: <one of: financial_agent, sneaker_agent, inventory_agent, logistics_agent>
 """)
     ])
 
-    llm_answer = decision.content.strip().lower()
-    print(f"[orchestrator] LLM chose: '{llm_answer}'")
+    reasoning, answer = split_reasoning_answer(decision.content)
+    llm_answer = answer.lower()
 
-    # Guardrail — only route to known agent names
     if "financial_agent" in llm_answer:
         next_step = "financial_agent"
     elif "inventory_agent" in llm_answer:
@@ -61,11 +61,9 @@ financial_agent, sneaker_agent, inventory_agent, logistics_agent
     elif "sneaker_agent" in llm_answer:
         next_step = "sneaker_agent"
     else:
-        print("[orchestrator] Did not recognise LLM answer — defaulting to financial_agent.")
         next_step = "financial_agent"
 
-    print(f"[orchestrator] Routing to: {next_step}")
-    return {"next": next_step}
+    return {"next": next_step, "reasoning": reasoning}
 
 
 def router(state):
