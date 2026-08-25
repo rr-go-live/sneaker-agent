@@ -16,14 +16,15 @@ and returns either:
   Or None — meaning this scorer does not apply to the given test case and
   should be excluded from that case's overall score.
 
-There are six scorers, each targeting one eval dimension:
+There are four scorers, each targeting one eval dimension:
 
   1. score_routing          — Did the orchestrator pick the right first agent?
-  2. score_budget_accuracy  — Did financial_agent retrieve the right budget?
-  3. score_sneaker_validity — Did sneaker_agent avoid hallucinating names?
-  4. score_budget_compliance— Did the total cost stay under the user's budget?
-  5. score_failure_handling — Did an error path fail gracefully (no crash)?
-  6. score_latency          — Did the full run finish fast enough?
+  2. score_sneaker_validity — Did sneaker_agent avoid hallucinating names?
+  3. score_failure_handling — Did an error path fail gracefully (no crash)?
+  4. score_latency          — Did the full run finish fast enough?
+
+There is no budget scoring — the app has no price ceiling, so there's
+nothing to check a budget lookup or spend compliance against.
 """
 
 from data.catalog import SNEAKER_CATALOG
@@ -84,45 +85,6 @@ def score_routing(run_result):
     }
 
 
-def score_budget_accuracy(run_result):
-    """
-    score_budget_accuracy
-    ---------------------
-    Checks whether financial_agent looked up and stored the correct budget amount
-    in shared state. This validates the catalog data lookup, not the LLM.
-
-    Skipped when expected_budget is None.
-
-    Args:
-        run_result (dict): a RunResult produced by runner.py
-
-    Returns:
-        dict | None: ScoreResult, or None if not applicable
-    """
-    expected = run_result["test_case"].get("expected_budget")
-    if expected is None:
-        return None
-
-    actual = run_result["final_state"].get("budget")
-
-    if actual is None:
-        return {
-            "passed": False,
-            "score":  0.0,
-            "reason": f"no budget in state (expected ${expected:.2f})",
-        }
-
-    passed = abs(actual - expected) < 0.01
-    return {
-        "passed": passed,
-        "score":  1.0 if passed else 0.0,
-        "reason": (
-            f"${actual:.2f}"
-            + (" ✓" if passed else f"  (expected ${expected:.2f})")
-        ),
-    }
-
-
 def score_sneaker_validity(run_result):
     """
     score_sneaker_validity
@@ -164,61 +126,6 @@ def score_sneaker_validity(run_result):
         reason = f"{len(valid)}/{len(proposed)} valid — hallucinated: {invalid}"
 
     return {"passed": passed, "score": score, "reason": reason}
-
-
-def score_budget_compliance(run_result):
-    """
-    score_budget_compliance
-    -----------------------
-    Checks whether the sum of all proposed sneakers' retail prices stays at or
-    under the user's budget. This validates sneaker_agent's selection logic
-    end-to-end: budget retrieved → LLM picks → prices checked.
-
-    Score: 1.0 if total_retail <= budget, else 0.0.
-
-    Skipped when check_budget_compliance is False.
-
-    Args:
-        run_result (dict): a RunResult produced by runner.py
-
-    Returns:
-        dict | None: ScoreResult, or None if not applicable
-    """
-    if not run_result["test_case"].get("check_budget_compliance"):
-        return None
-
-    proposed = run_result["final_state"].get("proposed_sneakers", [])
-    budget   = run_result["final_state"].get("budget")
-
-    if budget is None:
-        return {
-            "passed": False,
-            "score":  0.0,
-            "reason": "cannot check compliance — no budget in state",
-        }
-
-    if len(proposed) == 0:
-        return {
-            "passed": False,
-            "score":  0.0,
-            "reason": "cannot check compliance — no sneakers were proposed",
-        }
-
-    total = sum(
-        SNEAKER_CATALOG[s]["retail_price"]
-        for s in proposed
-        if s in SNEAKER_CATALOG
-    )
-    passed = total <= budget
-
-    return {
-        "passed": passed,
-        "score":  1.0 if passed else 0.0,
-        "reason": (
-            f"${total:.2f} total vs ${budget:.2f} budget"
-            + (" ✓" if passed else "  — OVER BUDGET")
-        ),
-    }
 
 
 def score_failure_handling(run_result):

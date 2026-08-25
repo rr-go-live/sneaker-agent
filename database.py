@@ -4,10 +4,12 @@ database.py
 SQLAlchemy + SQLite data layer for user profiles, wardrobes, and inventory.
 
 Tables:
-  users             — one row per user (username, budget)
+  users             — one row per user (username, login, admin flag)
   wardrobe_items    — one row per sneaker per user (many-to-one → users)
   sneaker_inventory — one row per sneaker; quantity starts at 1 and decrements
-                      on purchase, making stock a live transactional concept
+                      when a sneaker is added to a wardrobe, making stock a
+                      live transactional concept. There is no price ceiling —
+                      any sneaker can be added regardless of cost.
 
 Using SQLite with check_same_thread=False so the sync agents running inside
 asyncio.to_thread can share the same engine without connection errors.
@@ -23,10 +25,12 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, DateTime, Float, ForeignKey,
+    Boolean, Column, DateTime, ForeignKey,
     Integer, String, UniqueConstraint, create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship
+
+from auth import verify_password
 
 DATABASE_URL = "sqlite:///./sneaker_agent.db"
 
@@ -48,18 +52,21 @@ class User(Base):
     One row per registered user.
 
     Fields:
-        id         (int):   auto-increment primary key
-        username   (str):   unique display name used as the lookup key
-        budget     (float): default spending budget in USD
-        created_at (dt):    row creation timestamp
-        wardrobe   (list):  related WardrobeItem rows
+        id            (int):   auto-increment primary key
+        username      (str):   unique display name used as the lookup key
+        password_hash (str):   PBKDF2 hash from auth.hash_password(); None
+                                for rows created before login existed
+        is_admin      (bool):  grants access to the custom eval scenario runner
+        created_at    (dt):    row creation timestamp
+        wardrobe      (list):  related WardrobeItem rows
     """
     __tablename__ = "users"
 
-    id         = Column(Integer, primary_key=True, autoincrement=True)
-    username   = Column(String(64), unique=True, nullable=False, index=True)
-    budget     = Column(Float, default=300.0, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    username      = Column(String(64), unique=True, nullable=False, index=True)
+    password_hash = Column(String(128), nullable=True)
+    is_admin      = Column(Boolean, default=False, nullable=False)
+    created_at    = Column(DateTime, default=datetime.utcnow)
 
     wardrobe = relationship(
         "WardrobeItem",
@@ -129,18 +136,46 @@ def init_db():
     """
     init_db
     -------
-    Creates all tables if they do not already exist. Safe to call on every
-    app startup — it is a no-op when tables are already present.
+    Creates all tables if they do not already exist, then adds any columns
+    that a newer version of the model expects but an existing database
+    predates (SQLAlchemy's create_all only creates missing tables, it never
+    alters an existing one). Safe to call on every app startup — a no-op
+    once the schema is current.
     """
     Base.metadata.create_all(engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns():
+    """
+    _add_missing_columns
+    ---------------------
+    Lightweight schema migration for SQLite: adds any column present on the
+    User model but missing from an existing users table, so upgrading to a
+    newer version of this app doesn't require deleting the database.
+
+    Not a general migration framework — just enough to keep local dev
+    databases in sync as the User model gains fields over time.
+    """
+    with engine.connect() as conn:
+        existing_columns = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)")
+        }
+
+        if "password_hash" not in existing_columns:
+            conn.exec_driver_sql("ALTER TABLE users ADD COLUMN password_hash VARCHAR(128)")
+        if "is_admin" not in existing_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"
+            )
+        conn.commit()
 
 
 def get_or_create_user(db: Session, username: str) -> User:
     """
     get_or_create_user
     ------------------
-    Fetches an existing user by username or creates a new one with default
-    budget if none exists.
+    Fetches an existing user by username or creates a new one if none exists.
 
     Args:
         db       (Session): active SQLAlchemy session
@@ -177,21 +212,28 @@ def get_user_wardrobe(username: str) -> list[str]:
         return [item.sneaker_name for item in user.wardrobe]
 
 
-def get_user_budget(username: str) -> float | None:
+def verify_login(username: str, password: str) -> dict | None:
     """
-    get_user_budget
-    ---------------
-    Returns the stored budget for a user, or None if the user doesn't exist.
+    verify_login
+    ------------
+    Checks a username/password pair against the stored PBKDF2 hash.
 
     Args:
-        username (str): the user to look up
+        username (str): the account to look up
+        password (str): plaintext password attempt
 
     Returns:
-        float | None: the user's budget, or None
+        dict | None: {"username": str, "is_admin": bool} on success,
+                      None if the user doesn't exist, has no password set
+                      (pre-auth seed data), or the password is wrong
     """
     with get_session() as db:
         user = db.query(User).filter_by(username=username).first()
-        return user.budget if user else None
+        if user is None or not user.password_hash:
+            return None
+        if not verify_password(password, user.password_hash):
+            return None
+        return {"username": user.username, "is_admin": user.is_admin}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,26 +1,26 @@
 import { useEffect, useRef } from 'react'
 
 /**
- * Agent color accents for the log badge
+ * Soft tint per agent, matching the app's badge convention
+ * (light background + saturated text, drawn from the brand palette).
  */
 const AGENT_COLORS = {
-  orchestrator:    { bg: '#2A3A30', text: '#7EC9A0' },
-  financial_agent: { bg: '#2A3035', text: '#7AB8D4' },
-  inventory_agent: { bg: '#2A2A38', text: '#9B8FD4' },
-  sneaker_agent:   { bg: '#302A38', text: '#C49FD4' },
-  critique_agent:  { bg: '#3A2A2A', text: '#D49F7A' },
-  logistics_agent: { bg: '#2A3028', text: '#A8C97A' },
+  orchestrator:    { bg: '#EEECE8', text: '#5B5F66', dot: '#8C9196' },
+  inventory_agent: { bg: '#F5F0ED', text: '#8C6B5A', dot: '#B8987F' },
+  sneaker_agent:   { bg: '#F5F1DC', text: '#7A7245', dot: '#C4BA72' },
+  critique_agent:  { bg: '#F3E8E4', text: '#A6604B', dot: '#CB8F78' },
+  logistics_agent: { bg: '#EEF1E6', text: '#6E7D52', dot: '#9EB6A8' },
 }
 
-const DEFAULT_AGENT_COLOR = { bg: '#282828', text: '#A0A0A0' }
+const DEFAULT_AGENT_COLOR = { bg: '#F1EFEA', text: '#8C9196', dot: '#C0BCB2' }
 
 /**
  * LogPane
  * -------
- * Terminal-style streaming log panel. Each agent step appears as a block
- * with a timestamp, colored agent badge, the action summary, the agent's
- * own reasoning (why it made its decision), and the routing handoff.
- * New entries animate in and the pane auto-scrolls to the latest line.
+ * Vertical timeline of agent steps. Each entry shows the agent, what it
+ * did, and — when available — the plain-English reasoning behind that
+ * decision, so the user can follow the LLM's logic rather than just a
+ * routing trace.
  *
  * Props:
  *   steps   [{node, label, summary, reasoning, next}] — completed steps in order
@@ -31,121 +31,86 @@ export default function LogPane({ steps, loading }) {
 
   // Auto-scroll to latest entry
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [steps.length, loading])
 
   if (steps.length === 0 && !loading) {
     return (
-      <div className="log-pane log-pane-empty">
-        <span className="log-cursor">▋</span>
-        <span className="log-empty-text"> Waiting for pipeline to start…</span>
+      <div className="results-panel-empty" style={{ minHeight: 320 }}>
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
+          stroke="#B8BDA7" strokeWidth="1.5">
+          <path d="M8 10h8M8 14h5M21 12c0 4.97-4.03 9-9 9-1.5 0-2.9-.37-4.14-1.02L3 21l1.1-3.66A8.96 8.96 0 013 12c0-4.97 4.03-9 9-9s9 4.03 9 9z"
+            strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        <p className="results-panel-empty-title">Agent reasoning appears here</p>
+        <p className="results-panel-empty-sub">
+          Each step will show what the agent decided and why
+        </p>
       </div>
     )
   }
 
   return (
     <div className="log-pane">
-      {/* Static header */}
-      <div className="log-header-row">
-        <span className="log-header-text">sneaker-agent  pipeline log</span>
-      </div>
+      {steps.map((step, i) => {
+        const ac       = AGENT_COLORS[step.node] || DEFAULT_AGENT_COLOR
+        const isLast   = i === steps.length - 1
+        const hasNext  = Boolean(step.next)
+        const showLine = i < steps.length - 1 || loading
 
-      <div className="log-entries">
-        {steps.map((step, i) => {
-          const ac      = AGENT_COLORS[step.node] || DEFAULT_AGENT_COLOR
-          const isLast  = i === steps.length - 1
+        return (
+          <div
+            key={`${step.node}-${i}`}
+            className="log-step"
+            style={{ animationDelay: `${i * 50}ms` }}
+          >
+            <div className="log-step-rail">
+              <span className="log-step-dot" style={{ background: ac.dot }} />
+              {showLine && <span className="log-step-line" />}
+            </div>
 
-          // Build the log lines for this step
-          const lines = []
-
-          // Routing line — what the previous agent handed off to
-          if (i === 0) {
-            lines.push({ type: 'system', text: '  Pipeline started' })
-          }
-
-          // The agent's own action line
-          lines.push({ type: 'agent', text: step.summary || '...' })
-
-          // The agent's reasoning — why it made this decision
-          if (step.reasoning) {
-            lines.push({ type: 'reasoning', text: step.reasoning })
-          }
-
-          // Routing forward
-          if (step.next) {
-            lines.push({ type: 'route', text: `  → routing to ${step.next.replace(/_/g, ' ')}` })
-          } else if (!loading || !isLast) {
-            lines.push({ type: 'route', text: '  → pipeline complete' })
-          }
-
-          return (
-            <div
-              key={`${step.node}-${i}`}
-              className="log-entry"
-              style={{ animationDelay: `${i * 40}ms` }}
-            >
-              {/* Timestamp + badge */}
-              <div className="log-entry-header">
-                <span className="log-timestamp">{formatTime(i)}</span>
+            <div className="log-step-body">
+              <div className="log-step-header">
                 <span
-                  className="log-badge"
+                  className="log-step-badge"
                   style={{ background: ac.bg, color: ac.text }}
                 >
                   {step.label}
                 </span>
+                <span className="log-step-summary">{step.summary || '…'}</span>
               </div>
 
-              {/* Lines */}
-              {lines.map((line, li) => (
-                <div
-                  key={li}
-                  className={`log-line log-line-${line.type}`}
-                  style={isLast && li === lines.length - 1
-                    ? { animation: 'logTypeIn 0.25s ease forwards' }
-                    : undefined}
-                >
-                  {line.type === 'agent' && <span className="log-prompt">$</span>}
-                  {line.type === 'reasoning' && <span className="log-think-label">reasoning</span>}
-                  {line.text}
-                </div>
-              ))}
+              {step.reasoning && (
+                <p className="log-step-reasoning">{step.reasoning}</p>
+              )}
+
+              {hasNext && (
+                <span className="log-step-route">
+                  Next: {step.next.replace(/_/g, ' ')}
+                </span>
+              )}
+              {!hasNext && (!loading || !isLast) && (
+                <span className="log-step-route log-step-route-done">
+                  ✓ Pipeline complete
+                </span>
+              )}
             </div>
-          )
-        })}
-
-        {/* Running indicator */}
-        {loading && (
-          <div className="log-entry log-running" key="running">
-            <span className="log-cursor-blink">▋</span>
-            <span className="log-running-text"> processing…</span>
           </div>
-        )}
+        )
+      })}
 
-        <div ref={bottomRef} />
-      </div>
+      {loading && (
+        <div className="log-step" key="pending">
+          <div className="log-step-rail">
+            <span className="log-step-dot log-step-dot-pending" />
+          </div>
+          <div className="log-step-body">
+            <span className="log-step-pending-text">Thinking…</span>
+          </div>
+        </div>
+      )}
+
+      <div ref={bottomRef} />
     </div>
   )
-}
-
-/**
- * formatTime
- * ----------
- * Returns a fake incremental timestamp for display (HH:MM:SS.ms).
- * Uses current time offset by step index so it looks like a real log.
- *
- * Args:
- *   index (number): step index
- *
- * Returns:
- *   string: formatted timestamp
- */
-function formatTime(index) {
-  const now    = new Date()
-  const offset = index * 2400   // ~2.4s per step
-  const t      = new Date(now.getTime() - (Date.now() % 86400000) + offset)
-  const hh     = String(t.getHours()).padStart(2, '0')
-  const mm     = String(t.getMinutes()).padStart(2, '0')
-  const ss     = String(t.getSeconds()).padStart(2, '0')
-  const ms     = String(t.getMilliseconds()).padStart(3, '0')
-  return `${hh}:${mm}:${ss}.${ms}`
 }

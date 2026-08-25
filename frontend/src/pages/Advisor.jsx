@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import SneakerCard    from '../components/SneakerCard'
 import LogPane        from '../components/LogPane'
 import SneakerPicker  from '../components/SneakerPicker'
+import { useAuth }    from '../auth/AuthContext'
 
 const COLOR_OPTIONS = [
   { label: 'Black',  value: 'black',  dot: '#2A2D30' },
@@ -24,7 +26,6 @@ const PROFILE_OPTIONS = [
 // Maps node names to display labels matching api.py NODE_LABELS
 const NODE_LABELS = {
   orchestrator:    'Orchestrator',
-  financial_agent: 'Financial Agent',
   sneaker_agent:   'Sneaker Advisor',
   inventory_agent: 'Inventory Agent',
   critique_agent:  'Critique Agent',
@@ -42,20 +43,21 @@ const DEFAULT_WARDROBE = [
  * buildQuery
  * ----------
  * Converts structured form fields plus wardrobe + interested items into a
- * natural language query the orchestrator can route correctly.
+ * natural language query the orchestrator can route correctly. There is no
+ * budget/price concept — the user can search for and add any sneaker
+ * regardless of cost.
  *
  * Args:
  *   brands        (string[])  — selected brand filters
  *   colors        (string[])  — selected colorway filters
  *   profile       (string)    — silhouette profile preference
- *   maxPrice      (string)    — max budget string
  *   wardrobeNames (string[])  — names of sneakers already owned
  *   interestedText (string)   — free-text description of what the user wants
  *
  * Returns:
  *   string: natural language query
  */
-function buildQuery(brands, colors, profile, maxPrice, wardrobeNames, interestedText) {
+function buildQuery(brands, colors, profile, wardrobeNames, interestedText) {
   const parts = []
 
   if (wardrobeNames.length > 0) {
@@ -66,13 +68,12 @@ function buildQuery(brands, colors, profile, maxPrice, wardrobeNames, interested
 
   const description = interestedText.trim()
   if (description) {
-    parts.push(`Here is what I'm looking for in my own words: "${description}". Please evaluate whether anything in the catalog fits this, my style, and my budget, and suggest the best matching options.`)
+    parts.push(`Here is what I'm looking for in my own words: "${description}". Please evaluate whether anything in the catalog fits this and my style, and suggest the best matching options.`)
   }
 
   if (brands.length > 0)  parts.push(`I prefer ${brands.join(' or ')}.`)
   if (colors.length > 0)  parts.push(`I like ${colors.join(' or ')} colorways.`)
   if (profile !== 'any')  parts.push(`I prefer ${profile}-top silhouettes.`)
-  if (maxPrice)           parts.push(`My budget is $${maxPrice}.`)
 
   return parts.join(' ')
 }
@@ -82,53 +83,103 @@ function buildQuery(brands, colors, profile, maxPrice, wardrobeNames, interested
  * -------
  * AI-driven recommendation page. The preference form is converted into a
  * natural language query which runs through the full LangGraph multi-agent
- * pipeline (orchestrator → financial_agent → sneaker_agent → logistics_agent).
+ * pipeline (orchestrator → sneaker_agent → critique_agent → logistics_agent).
+ * There is no budget concept — any sneaker can be searched for and added
+ * regardless of cost; retail/market price is still shown as reference data.
  *
  * Agent steps stream in via SSE and are rendered as a live pipeline
  * visualization. Recommendation cards appear once the pipeline completes.
  */
 export default function Advisor() {
+  const { user, loading: authLoading } = useAuth()
+  const navigate = useNavigate()
+
+  // Redirect to login if not signed in — AI Advisor requires an account so
+  // the pipeline knows who's shopping. Sends the user back here afterward.
+  useEffect(() => {
+    if (!authLoading && !user) {
+      navigate('/login', { state: { from: '/advisor' }, replace: true })
+    }
+  }, [authLoading, user, navigate])
+
   // Form state
   const [selectedBrands,  setSelectedBrands]  = useState([])
   const [selectedColors,  setSelectedColors]  = useState([])
   const [profile,         setProfile]         = useState('any')
-  const [minPrice,        setMinPrice]        = useState('')
-  const [maxPrice,        setMaxPrice]        = useState('')
   const [wardrobeItems,   setWardrobeItems]   = useState(DEFAULT_WARDROBE)
   const [interestedText,  setInterestedText]  = useState('')
 
   // User profile state
-  const [username,      setUsername]      = useState('')
-  const [profileStatus, setProfileStatus] = useState(null)   // 'loading' | 'loaded' | 'error'
+  const [username, setUsername] = useState('')
 
   // Pipeline state
   const [loading,   setLoading]   = useState(false)
   const [steps,     setSteps]     = useState([])   // [{node, label, summary, next}]
   const [sneakers,  setSneakers]  = useState([])
   const [error,     setError]     = useState(null)
-  const [activeTab, setActiveTab] = useState('logging')
+  const [activeTab, setActiveTab] = useState('wardrobe')
 
   // Auto-switch to sneakers tab when results arrive
   useEffect(() => {
     if (sneakers.length > 0) setActiveTab('sneakers')
   }, [sneakers.length])
 
-  async function loadProfile() {
-    if (!username.trim()) return
-    setProfileStatus('loading')
+  /**
+   * enrichWardrobe
+   * ---------------
+   * The user profile endpoint only returns wardrobe sneaker names. Looks
+   * each one up against the catalog so the Wardrobe tab can render real
+   * cards (photo, price, market data) instead of bare name stubs.
+   *
+   * Args:
+   *   names (string[]) — wardrobe sneaker names from the profile
+   *
+   * Returns:
+   *   Promise<object[]> — full catalog entries, one per name (falls back
+   *   to a bare {name} stub if a name has no exact catalog match)
+   */
+  async function enrichWardrobe(names) {
+    return Promise.all(
+      names.map(async name => {
+        try {
+          const res = await fetch(`/api/sneakers?q=${encodeURIComponent(name)}`)
+          if (res.ok) {
+            const matches = await res.json()
+            const exact = matches.find(s => s.name === name)
+            if (exact) return exact
+          }
+        } catch {
+          // fall through to the stub below
+        }
+        return { name, brand: '', retail_price: null }
+      })
+    )
+  }
+
+  async function loadProfile(name) {
     try {
-      const res = await fetch(`/api/users/${encodeURIComponent(username.trim())}`)
-      if (!res.ok) throw new Error('User not found')
+      const res = await fetch(`/api/users/${encodeURIComponent(name)}`)
+      if (!res.ok) return
       const data = await res.json()
-      if (data.budget) setMaxPrice(String(data.budget))
       if (data.wardrobe?.length) {
-        setWardrobeItems(data.wardrobe.map(name => ({ name, brand: '', retail_price: null })))
+        const enriched = await enrichWardrobe(data.wardrobe)
+        setWardrobeItems(enriched)
       }
-      setProfileStatus('loaded')
+      setActiveTab('wardrobe')
     } catch {
-      setProfileStatus('error')
+      // no wardrobe on the account yet — keep the default wardrobe
     }
   }
+
+  // Once logged in, load that account's wardrobe so the form reflects
+  // who's shopping.
+  useEffect(() => {
+    if (user && !username) {
+      setUsername(user.username)
+      loadProfile(user.username)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user])
 
   function toggleBrand(brand) {
     setSelectedBrands(prev =>
@@ -153,9 +204,10 @@ export default function Advisor() {
     const wardrobeNames  = wardrobeItems.map(i => i.name)
 
     const payload = {
-      input:    buildQuery(selectedBrands, selectedColors, profile, maxPrice, wardrobeNames, interestedText),
-      budget:   maxPrice ? parseFloat(maxPrice) : null,
+      input:    buildQuery(selectedBrands, selectedColors, profile, wardrobeNames, interestedText),
       wardrobe: wardrobeNames,
+      brands:   selectedBrands,
+      colors:   selectedColors,
     }
 
     try {
@@ -203,15 +255,17 @@ export default function Advisor() {
     }
   }
 
-  const hasResult = sneakers.length > 0 || error
-  const hasActivity = steps.length > 0 || loading
+  // Avoid flashing the form before the redirect-to-login effect above fires.
+  if (authLoading || !user) {
+    return <div className="container" />
+  }
 
   return (
     <div className="container">
       <div className="page-header">
         <h1 className="page-title">AI Advisor</h1>
         <p className="page-subtitle">
-          Five agents work together to build your perfect rotation
+          Four agents work together to build your perfect rotation
         </p>
       </div>
 
@@ -219,36 +273,6 @@ export default function Advisor() {
 
         {/* ── Left: Preference form ── */}
         <form className="advisor-form" onSubmit={handleSubmit}>
-
-          {/* User profile loader */}
-          <div className="form-section">
-            <span className="form-section-label">Load Profile</span>
-            <div className="profile-load-row">
-              <input
-                className="price-input"
-                style={{ width: '100%' }}
-                type="text"
-                placeholder="Username (john, alice, demo…)"
-                value={username}
-                onChange={e => { setUsername(e.target.value); setProfileStatus(null) }}
-                onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), loadProfile())}
-              />
-              <button
-                type="button"
-                className="profile-load-btn"
-                onClick={loadProfile}
-                disabled={!username.trim() || profileStatus === 'loading'}
-              >
-                {profileStatus === 'loading' ? '…' : 'Load'}
-              </button>
-            </div>
-            {profileStatus === 'loaded' && (
-              <p className="profile-status ok">Profile loaded — budget and wardrobe pre-filled</p>
-            )}
-            {profileStatus === 'error' && (
-              <p className="profile-status err">User not found. Try: john, alice, demo</p>
-            )}
-          </div>
 
           <div className="form-section">
             <span className="form-section-label">Brand</span>
@@ -297,17 +321,6 @@ export default function Advisor() {
           </div>
 
           <div className="form-section">
-            <span className="form-section-label">Price Range</span>
-            <div className="price-row">
-              <input className="price-input" type="number" placeholder="Min $"
-                min="0" value={minPrice} onChange={e => setMinPrice(e.target.value)} />
-              <span className="price-sep">—</span>
-              <input className="price-input" type="number" placeholder="Max $"
-                min="0" value={maxPrice} onChange={e => setMaxPrice(e.target.value)} />
-            </div>
-          </div>
-
-          <div className="form-section">
             <span className="form-section-label">Current Wardrobe</span>
             <p className="form-section-hint">
               What you already own — agents will avoid duplicates and find complementary styles.
@@ -343,45 +356,54 @@ export default function Advisor() {
         {/* ── Right: Tabs + content ── */}
         <div className="results-panel">
 
-          {/* Empty state — nothing running yet */}
-          {!hasActivity && !hasResult && (
-            <div className="results-panel-empty">
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
-                stroke="#B8BDA7" strokeWidth="1.5">
-                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"
-                  strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              <p className="results-panel-empty-title">Your rotation appears here</p>
-              <p className="results-panel-empty-sub">
-                Set your preferences and let the agent pipeline find your next pair
-              </p>
-            </div>
-          )}
-
           {/* Tab bar */}
-          {(hasActivity || hasResult) && (
-            <div className="result-tabs">
-              <button
-                className={'result-tab' + (activeTab === 'logging' ? ' active' : '')}
-                onClick={() => setActiveTab('logging')}
-              >
-                Logging
-              </button>
-              <button
-                className={'result-tab' + (activeTab === 'sneakers' ? ' active' : '')}
-                onClick={() => setActiveTab('sneakers')}
-              >
-                Sneakers{sneakers.length > 0 ? ` (${sneakers.length})` : ''}
-              </button>
-            </div>
+          <div className="result-tabs">
+            <button
+              className={'result-tab' + (activeTab === 'wardrobe' ? ' active' : '')}
+              onClick={() => setActiveTab('wardrobe')}
+            >
+              Wardrobe{wardrobeItems.length > 0 ? ` (${wardrobeItems.length})` : ''}
+            </button>
+            <button
+              className={'result-tab' + (activeTab === 'logging' ? ' active' : '')}
+              onClick={() => setActiveTab('logging')}
+            >
+              Reasoning
+            </button>
+            <button
+              className={'result-tab' + (activeTab === 'sneakers' ? ' active' : '')}
+              onClick={() => setActiveTab('sneakers')}
+            >
+              Suggestions{sneakers.length > 0 ? ` (${sneakers.length})` : ''}
+            </button>
+          </div>
+
+          {/* Wardrobe tab */}
+          {activeTab === 'wardrobe' && (
+            <>
+              {wardrobeItems.length > 0 ? (
+                <div className="rec-grid">
+                  {wardrobeItems.map(s => (
+                    <SneakerCard key={s.name} sneaker={s} username={username || null} ownedView />
+                  ))}
+                </div>
+              ) : (
+                <div className="results-panel-empty" style={{ minHeight: 200 }}>
+                  <p className="results-panel-empty-title">No wardrobe items yet</p>
+                  <p className="results-panel-empty-sub">
+                    Search the catalog to add what you already own
+                  </p>
+                </div>
+              )}
+            </>
           )}
 
-          {/* Logging tab */}
+          {/* Reasoning tab */}
           {activeTab === 'logging' && (
             <LogPane steps={steps} loading={loading} />
           )}
 
-          {/* Sneakers tab */}
+          {/* Suggestions tab */}
           {activeTab === 'sneakers' && (
             <>
               {error && (

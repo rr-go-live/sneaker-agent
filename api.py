@@ -9,31 +9,37 @@ Endpoints:
   POST /api/evals/run             — runs the eval harness (SSE stream)
   GET  /api/users                 — list all user profiles
   GET  /api/users/{username}      — get a single user's profile + wardrobe
-  PUT  /api/users/{username}      — update budget
   POST /api/users/{username}/wardrobe        — add a sneaker to wardrobe
   DELETE /api/users/{username}/wardrobe/{name} — remove a sneaker from wardrobe
+  POST /api/inventory/purchase    — buy at listed price; decrements inventory
+  POST /api/bid                   — offer a price; an agent judges fairness against
+                                     real market data and purchases automatically if accepted
 
 Run with:
   uvicorn api:app --reload
 """
 
 import json
+import os
+import secrets
 import asyncio
 import threading
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from starlette.middleware.sessions import SessionMiddleware
 
 from data.catalog import SNEAKER_CATALOG
 from database import (
     User, WardrobeItem, SneakerInventory,
     get_or_create_user, get_session, get_sneaker_quantity,
-    purchase_sneaker, init_db,
+    purchase_sneaker, get_out_of_stock_names, init_db, verify_login,
 )
 from graph import build_graph
+from agents.bid_agent import evaluate_bid
 from evals.cases import TEST_CASES
 
 init_db()
@@ -45,12 +51,26 @@ app.add_middleware(
     allow_origins=["http://localhost:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
+
+# Signs the session cookie used for login. Set SESSION_SECRET in .env so
+# sessions survive a server restart; without it, a random key is generated
+# for this process only and everyone is logged out on the next restart.
+_session_secret = os.environ.get("SESSION_SECRET")
+if not _session_secret:
+    _session_secret = secrets.token_hex(32)
+    print(
+        "WARNING: SESSION_SECRET not set in .env — using a random key for "
+        "this process only. Logins will not survive a server restart. "
+        "Set SESSION_SECRET=<random value> in .env to fix this."
+    )
+
+app.add_middleware(SessionMiddleware, secret_key=_session_secret, same_site="lax")
 
 # Human-readable labels for each LangGraph node
 NODE_LABELS = {
     "orchestrator":    "Orchestrator",
-    "financial_agent": "Financial Agent",
     "sneaker_agent":   "Sneaker Advisor",
     "inventory_agent": "Inventory Agent",
     "critique_agent":  "Critique Agent",
@@ -70,12 +90,15 @@ class AgentInput(BaseModel):
 
     Fields:
         input    (str):         natural language query from the UI
-        budget   (float|None):  pre-set budget from the form; skips financial_agent lookup
         wardrobe (list[str]):   sneakers the user already owns; skips inventory lookup
+        brands   (list[str]):   brand chips selected in the form; hard-filtered
+                                by sneaker_agent instead of left to the LLM
+        colors   (list[str]):   colorway chips selected in the form
     """
     input:    str
-    budget:   Optional[float] = None
     wardrobe: list[str]       = []
+    brands:   list[str]       = []
+    colors:   list[str]       = []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,16 +171,19 @@ async def run_agent(body: AgentInput):
       [DONE]
 
     Args:
-        body (AgentInput): user input, optional budget, optional wardrobe
+        body (AgentInput): user input, optional brand/color filters, optional wardrobe
 
     Returns:
         StreamingResponse: SSE stream
     """
     async def generate():
-        initial_state = {"input": body.input, "user_name": "web_user"}
+        initial_state = {
+            "input":            body.input,
+            "user_name":        "web_user",
+            "requested_brands": body.brands,
+            "requested_colors": body.colors,
+        }
 
-        if body.budget is not None and body.budget > 0:
-            initial_state["budget"] = body.budget
         if body.wardrobe:
             initial_state["sneaker_collection"] = body.wardrobe
 
@@ -263,19 +289,27 @@ class EvalRunRequest(BaseModel):
     Optional request body for POST /api/evals/run.
 
     Fields:
-        case_id (str|None): if given, run only the test case with this ID.
-                            If omitted, all cases are run.
+        case_id      (str|None): if given, run only the test case with this
+                                 ID. Ignored when custom_input is set.
+        custom_input (str|None): a free-text prompt to run through the full
+                                 pipeline as a one-off scenario instead of
+                                 the fixed TEST_CASES suite.
     """
-    case_id: Optional[str] = None
+    case_id:      Optional[str] = None
+    custom_input: Optional[str] = None
 
 
 @app.post("/api/evals/run")
-async def run_evals(body: EvalRunRequest):
+async def run_evals(body: EvalRunRequest, request: Request):
     """
     run_evals
     ---------
     Runs the eval harness against the agent graph and streams each completed
     test case as an SSE event the moment it finishes.
+
+    Admin-only — the eval dashboard exposes internal routing/scoring detail
+    that isn't meant for regular shopping accounts. Enforced here (not just
+    hidden in the UI) so a direct API call is rejected the same way.
 
     Uses a background thread (synchronous runner.py) bridged to the async
     FastAPI generator via asyncio.Queue, matching the pattern used by /api/agent.
@@ -291,13 +325,33 @@ async def run_evals(body: EvalRunRequest):
       [DONE]
 
     Args:
-        body (EvalRunRequest): optional case_id filter
+        body    (EvalRunRequest): optional case_id filter or custom_input
+        request (Request):        used to read the session for the admin check
 
     Returns:
         StreamingResponse: SSE stream
+
+    Raises:
+        HTTPException: 403 if the session isn't an admin
     """
+    if not request.session.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
     async def generate():
-        if body.case_id:
+        if body.custom_input:
+            cases = [{
+                "id":                       "CUSTOM",
+                "name":                     "Custom scenario",
+                "description":              "Ad-hoc admin scenario — no fixed expected outcome, "
+                                             "scored only on dimensions that don't require one (e.g. latency).",
+                "input":                    body.custom_input,
+                "user_name":                "admin",
+                "expected_first_agent":     None,
+                "expect_proposed_sneakers": False,
+                "is_failure_case":          False,
+                "expected_output_contains": None,
+            }]
+        elif body.case_id:
             cases = [c for c in TEST_CASES if c["id"] == body.case_id]
             if not cases:
                 event = {"type": "error", "message": f"No test case with id '{body.case_id}'"}
@@ -441,10 +495,6 @@ def _node_summary(node_name: str, updates: dict) -> str:
         next_node = updates.get("next", "")
         return f"Routing to {NODE_LABELS.get(next_node, next_node)}"
 
-    if node_name == "financial_agent":
-        budget = updates.get("budget")
-        return f"Budget confirmed: ${budget:.2f}" if budget else updates.get("output", "")
-
     if node_name == "inventory_agent":
         collection = updates.get("sneaker_collection") or []
         count      = len(collection)
@@ -473,6 +523,71 @@ def _node_summary(node_name: str, updates: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Auth routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    """
+    LoginRequest
+    ------------
+    Request body for POST /api/auth/login.
+
+    Fields:
+        username (str): account username
+        password (str): plaintext password, checked against the stored hash
+    """
+    username: str
+    password: str
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest, request: Request):
+    """
+    login
+    -----
+    Verifies username/password and, on success, stores the identity in a
+    signed session cookie so subsequent requests know who's logged in.
+
+    Returns 401 for any failure (unknown user, no password set, wrong
+    password) without distinguishing which — avoids confirming whether a
+    given username exists.
+    """
+    user = verify_login(body.username, body.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    request.session["username"] = user["username"]
+    request.session["is_admin"] = user["is_admin"]
+    return user
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    """
+    logout
+    ------
+    Clears the session cookie.
+    """
+    request.session.clear()
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def me(request: Request):
+    """
+    me
+    --
+    Returns the currently logged-in user from the session, or 401 if no
+    one is logged in. Used by the frontend on page load to restore auth
+    state after a refresh.
+    """
+    username = request.session.get("username")
+    if not username:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return {"username": username, "is_admin": request.session.get("is_admin", False)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # User profile routes
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -481,14 +596,13 @@ def list_users():
     """
     list_users
     ----------
-    Returns all user profiles (id, username, budget, wardrobe item count).
+    Returns all user profiles (id, username, wardrobe item count).
     """
     with get_session() as db:
         users = db.query(User).order_by(User.username).all()
         return [
             {
                 "username":      u.username,
-                "budget":        u.budget,
                 "wardrobe_count": len(u.wardrobe),
             }
             for u in users
@@ -508,26 +622,8 @@ def get_user(username: str):
             raise HTTPException(status_code=404, detail=f"User '{username}' not found")
         return {
             "username": user.username,
-            "budget":   user.budget,
             "wardrobe": [item.sneaker_name for item in user.wardrobe],
         }
-
-
-class UpdateBudget(BaseModel):
-    budget: float
-
-
-@app.put("/api/users/{username}")
-def update_user(username: str, body: UpdateBudget):
-    """
-    update_user
-    -----------
-    Creates or updates a user's budget.
-    """
-    with get_session() as db:
-        user = get_or_create_user(db, username)
-        user.budget = body.budget
-        return {"username": user.username, "budget": user.budget}
 
 
 class AddWardrobeItem(BaseModel):
@@ -602,6 +698,41 @@ def get_inventory(sneaker_name: str):
     }
 
 
+def _purchase_and_add_to_wardrobe(sneaker_name: str, username: Optional[str]):
+    """
+    _purchase_and_add_to_wardrobe
+    ------------------------------
+    Decrements live inventory by 1 and, if a username is given, adds the
+    sneaker to that user's wardrobe (skipping if already owned). Shared by
+    the flat-price purchase route and an accepted bid, so both paths
+    remove a sneaker from inventory the same way.
+
+    Args:
+        sneaker_name (str):      exact catalog name
+        username     (str|None): if provided, sneaker is added to their wardrobe
+
+    Returns:
+        int | None: remaining quantity if the purchase succeeded, or None
+                     if the sneaker was already out of stock
+    """
+    success = purchase_sneaker(sneaker_name)
+    if not success:
+        return None
+
+    if username:
+        with get_session() as db:
+            user = get_or_create_user(db, username)
+            already_owned = (
+                db.query(WardrobeItem)
+                .filter_by(user_id=user.id, sneaker_name=sneaker_name)
+                .first()
+            )
+            if not already_owned:
+                db.add(WardrobeItem(user_id=user.id, sneaker_name=sneaker_name))
+
+    return get_sneaker_quantity(sneaker_name)
+
+
 class PurchaseRequest(BaseModel):
     """
     PurchaseRequest
@@ -615,31 +746,86 @@ class PurchaseRequest(BaseModel):
 
 
 @app.post("/api/inventory/purchase")
-def purchase(body: PurchaseRequest):
+def purchase(body: PurchaseRequest, request: Request):
     """
     purchase
     --------
-    Decrements inventory by 1. Returns 409 if out of stock. If username is
-    provided, also adds the sneaker to the user's wardrobe.
+    Decrements inventory by 1. Requires a logged-in session — enforced here,
+    not just hidden in the UI, so a direct API call is rejected the same way.
+    Returns 409 if out of stock. If username is provided, also adds the
+    sneaker to the user's wardrobe.
     """
-    success = purchase_sneaker(body.sneaker_name)
-    if not success:
+    if not request.session.get("username"):
+        raise HTTPException(status_code=401, detail="Log in to purchase")
+
+    remaining = _purchase_and_add_to_wardrobe(body.sneaker_name, body.username)
+    if remaining is None:
         raise HTTPException(status_code=409, detail="Out of stock")
 
-    if body.username:
-        with get_session() as db:
-            user = get_or_create_user(db, body.username)
-            already_owned = (
-                db.query(WardrobeItem)
-                .filter_by(user_id=user.id, sneaker_name=body.sneaker_name)
-                .first()
-            )
-            if not already_owned:
-                db.add(WardrobeItem(user_id=user.id, sneaker_name=body.sneaker_name))
-
-    remaining = get_sneaker_quantity(body.sneaker_name)
     return {
         "success":      True,
         "sneaker_name": body.sneaker_name,
         "quantity":     remaining,
+    }
+
+
+class BidRequest(BaseModel):
+    """
+    BidRequest
+    ----------
+    Request body for POST /api/bid.
+
+    Fields:
+        sneaker_name (str):       exact catalog name being bid on
+        bid_amount   (float):     the offered dollar amount
+        username     (str|None):  if provided and the bid is accepted, the
+                                  sneaker is added to their wardrobe
+    """
+    sneaker_name: str
+    bid_amount:   float
+    username:     Optional[str] = None
+
+
+@app.post("/api/bid")
+def place_bid(body: BidRequest, request: Request):
+    """
+    place_bid
+    ---------
+    Evaluates a bid against the sneaker's real market data (bid_agent.py).
+    If accepted, immediately purchases it — same mechanics as the flat-price
+    Purchase button (decrements inventory, adds to wardrobe if a username
+    was given).
+
+    Requires a logged-in session — enforced here (checked before the LLM
+    call, not after) so an unauthenticated request never spends one.
+
+    Returns 409 if the bid is accepted but the sneaker sold out between
+    evaluation and purchase (a live race, not an evaluation failure).
+    """
+    if not request.session.get("username"):
+        raise HTTPException(status_code=401, detail="Log in to place a bid")
+
+    out_of_stock = get_out_of_stock_names()
+    result = evaluate_bid(body.sneaker_name, body.bid_amount, SNEAKER_CATALOG, out_of_stock)
+
+    if not result["accepted"]:
+        return {
+            "accepted":  False,
+            "reasoning": result["reasoning"],
+            "purchased": False,
+            "quantity":  get_sneaker_quantity(body.sneaker_name),
+        }
+
+    remaining = _purchase_and_add_to_wardrobe(body.sneaker_name, body.username)
+    if remaining is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Bid was accepted but the sneaker sold out just now",
+        )
+
+    return {
+        "accepted":  True,
+        "reasoning": result["reasoning"],
+        "purchased": True,
+        "quantity":  remaining,
     }

@@ -18,7 +18,7 @@ def inventory_agent(state):
       3. CLI path  — falls back to USER_SNEAKER_COLLECTION dict.
 
     A second LLM call then decides whether the user also wants to buy new
-    sneakers. If yes → financial_agent. If no → ends the flow here.
+    sneakers. If yes → sneaker_agent. If no → ends the flow here.
 
     Args:
         state (AgentState): reads 'sneaker_collection' (opt), 'user_name', 'input'
@@ -77,13 +77,13 @@ Return ONLY one of these two words:
 
     routing_answer = routing_response.content.strip().lower()
     wants_to_shop = "shop" in routing_answer
-    next_agent = "financial_agent" if wants_to_shop else END
+    next_agent = "sneaker_agent" if wants_to_shop else END
 
     if wants_to_shop:
         reasoning = (
             f"Reviewed {len(sneaker_collection)} item(s) in the collection and "
             "detected buying intent in the request, so I'm handing off to the "
-            "financial agent to set a budget before recommending new pairs."
+            "sneaker agent to find new picks."
         )
     else:
         reasoning = (

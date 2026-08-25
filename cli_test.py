@@ -268,13 +268,198 @@ def test_database_helpers():
     )
 
 
+def test_selection_logic():
+    """
+    test_selection_logic
+    ---------------------
+    Pure-function tests for agents/selection.py — the deterministic filtering
+    and validation logic sneaker_agent uses to guarantee brand/color/count
+    compliance, instead of relying on the LLM to follow soft prompt wording.
+
+    No LLM or database calls — these must be fast and fully deterministic.
+
+    Returns:
+        None. Records one result per assertion.
+    """
+    print("\nSelection logic (deterministic filtering)")
+    from agents.selection import (
+        filter_by_brand, filter_by_color, extract_requested_count,
+        extract_proposed_names, clamp_count_to_pool,
+    )
+
+    candidates = [
+        ("Jordan 4 Retro SB Pine Green",  {"brand": "Jordan", "colorway": "Pine Green"}),
+        ("Jordan 1 Retro High OG Bred",   {"brand": "Jordan", "colorway": "Black/Red"}),
+        ("Nike Dunk Low Grey Fog",        {"brand": "Nike",   "colorway": "Grey Fog"}),
+        ("adidas Adilette 22 Slides",     {"brand": "adidas", "colorway": "Sand"}),
+    ]
+
+    # ── filter_by_brand ──────────────────────────────────────────────────
+    result = filter_by_brand(candidates, [])
+    check(result == candidates, "filter_by_brand: no brands requested returns all candidates unchanged")
+
+    result = filter_by_brand(candidates, ["Jordan"])
+    check(
+        [n for n, _ in result] == ["Jordan 4 Retro SB Pine Green", "Jordan 1 Retro High OG Bred"],
+        "filter_by_brand: filters to only the requested brand",
+        f"got {[n for n, _ in result]}",
+    )
+
+    result = filter_by_brand(candidates, ["jordan"])
+    check(
+        len(result) == 2,
+        "filter_by_brand: brand match is case-insensitive",
+        f"got {len(result)} results",
+    )
+
+    result = filter_by_brand(candidates, ["New Balance"])
+    check(
+        result == [],
+        "filter_by_brand: a brand with zero matches returns an empty list (not silently ignored)",
+        f"got {[n for n, _ in result]}",
+    )
+
+    # ── filter_by_color ──────────────────────────────────────────────────
+    result, matched = filter_by_color(candidates, [])
+    check(
+        result == candidates and matched is True,
+        "filter_by_color: no colors requested returns all candidates unchanged",
+    )
+
+    result, matched = filter_by_color(candidates, ["Grey"])
+    check(
+        [n for n, _ in result] == ["Nike Dunk Low Grey Fog"] and matched is True,
+        "filter_by_color: matches candidates whose colorway contains the requested color",
+        f"got {[n for n, _ in result]}, matched={matched}",
+    )
+
+    result, matched = filter_by_color(candidates, ["Purple"])
+    check(
+        result == candidates and matched is False,
+        "filter_by_color: no candidate matches falls back to the full pool and reports matched=False",
+        f"got {len(result)} results, matched={matched}",
+    )
+
+    # ── extract_requested_count ──────────────────────────────────────────
+    check(
+        extract_requested_count("I'm looking for new sneakers", default=5) == 5,
+        "extract_requested_count: no number mentioned falls back to the default",
+    )
+
+    check(
+        extract_requested_count("high top released after 2020", default=5) == 5,
+        "extract_requested_count: an unrelated number (a year) is not mistaken for a count",
+    )
+
+    check(
+        extract_requested_count("give me just 2 options", default=5) == 2,
+        "extract_requested_count: parses an explicit digit count",
+    )
+
+    check(
+        extract_requested_count("show me three pairs", default=5) == 3,
+        "extract_requested_count: parses an explicit number-word count",
+    )
+
+    check(
+        extract_requested_count("I want 20 sneakers", default=5) == 10,
+        "extract_requested_count: clamps an unreasonably large request to the max (10)",
+    )
+
+    # ── extract_proposed_names ───────────────────────────────────────────
+    # Only two of the four candidates were actually shown to the LLM this time.
+    shown = candidates[:2]
+    raw_answer = "jordan 4 retro sb pine green, adidas adilette 22 slides"
+    result = extract_proposed_names(raw_answer, shown)
+    check(
+        result == ["Jordan 4 Retro SB Pine Green"],
+        "extract_proposed_names: ignores a name the LLM mentioned that wasn't in its candidate pool "
+        "(guards against hallucinated picks bypassing brand/stock filtering)",
+        f"got {result}",
+    )
+
+    # ── clamp_count_to_pool ───────────────────────────────────────────────
+    check(
+        clamp_count_to_pool(5, pool_size=2) == 2,
+        "clamp_count_to_pool: reduces an impossible request (5 from a pool of 2) down to the pool size",
+    )
+    check(
+        clamp_count_to_pool(3, pool_size=10) == 3,
+        "clamp_count_to_pool: leaves the request unchanged when the pool has enough candidates",
+    )
+    check(
+        clamp_count_to_pool(5, pool_size=0) == 0,
+        "clamp_count_to_pool: an empty pool clamps to zero rather than raising",
+    )
+
+
+def test_bid_validation():
+    """
+    test_bid_validation
+    --------------------
+    Pure-function tests for agents/bid_agent.validate_bid_request — the
+    deterministic pre-checks that reject an invalid bid (unknown sneaker,
+    out of stock, non-positive amount) without ever calling the LLM, since
+    those aren't market judgment calls.
+
+    No LLM calls — fast and fully deterministic.
+
+    Returns:
+        None. Records one result per assertion.
+    """
+    print("\nBid validation (deterministic pre-checks)")
+    from agents.bid_agent import validate_bid_request
+
+    catalog = {
+        "Jordan 4 Retro SB Pine Green": {"retail_price": 225, "market_value": 388},
+    }
+    out_of_stock = {"Nike Dunk Low Grey Fog"}
+
+    is_valid, reason = validate_bid_request(
+        "Not A Real Sneaker", 200, catalog, out_of_stock
+    )
+    check(
+        is_valid is False and reason is not None,
+        "validate_bid_request: rejects a sneaker that isn't in the catalog",
+        f"got is_valid={is_valid}, reason={reason!r}",
+    )
+
+    is_valid, reason = validate_bid_request(
+        "Nike Dunk Low Grey Fog", 100, {**catalog, "Nike Dunk Low Grey Fog": {"retail_price": 110}}, out_of_stock
+    )
+    check(
+        is_valid is False and reason is not None,
+        "validate_bid_request: rejects a bid on an out-of-stock sneaker",
+        f"got is_valid={is_valid}, reason={reason!r}",
+    )
+
+    is_valid, reason = validate_bid_request(
+        "Jordan 4 Retro SB Pine Green", 0, catalog, out_of_stock
+    )
+    check(
+        is_valid is False and reason is not None,
+        "validate_bid_request: rejects a zero or negative bid amount",
+        f"got is_valid={is_valid}, reason={reason!r}",
+    )
+
+    is_valid, reason = validate_bid_request(
+        "Jordan 4 Retro SB Pine Green", 200, catalog, out_of_stock
+    )
+    check(
+        is_valid is True and reason is None,
+        "validate_bid_request: a real, in-stock sneaker with a positive bid passes validation",
+        f"got is_valid={is_valid}, reason={reason!r}",
+    )
+
+
 def test_full_pipeline():
     """
     test_full_pipeline
     ------------------
     Runs the complete multi-agent graph for a buying request and confirms
-    that every node emits reasoning, the sneaker agent proposes picks, and
-    the picks respect the supplied budget.
+    that every node emits reasoning and the sneaker agent proposes picks.
+    There is no budget in this app, so there's nothing to check picks
+    against on that front — any in-stock sneaker is a valid candidate.
 
     Skipped when no real GOOGLE_API_KEY is configured, since it makes live
     Gemini calls.
@@ -288,15 +473,12 @@ def test_full_pipeline():
         record("full pipeline", "SKIP", "no GOOGLE_API_KEY configured")
         return
 
-    from data.catalog import SNEAKER_CATALOG
     from graph import build_graph
 
     graph = build_graph()
-    budget = 300.0
     initial_state = {
         "input": "I want a clean white low-top for everyday wear that holds resale value",
         "user_name": "cli_test_user",
-        "budget": budget,
     }
 
     nodes_seen = []
@@ -329,15 +511,128 @@ def test_full_pipeline():
         f"proposed={proposed}",
     )
 
-    total_retail = 0.0
-    for name in proposed:
-        details = SNEAKER_CATALOG.get(name, {})
-        total_retail += details.get("retail_price", 0)
+
+def test_bid_fairness_judgment():
+    """
+    test_bid_fairness_judgment
+    -----------------------------
+    Live regression test proving the LLM fairness judgment actually
+    discriminates on real pricing data: a bid far below market value
+    should be rejected, and a bid close to the lowest ask should be
+    accepted.
+
+    Skipped when no real GOOGLE_API_KEY is configured, since it makes live
+    Gemini calls.
+
+    Returns:
+        None. Records one result per assertion, or a single SKIP.
+    """
+    print("\nBid fairness judgment (live LLM)")
+
+    if not HAS_REAL_KEY:
+        record("bid fairness judgment", "SKIP", "no GOOGLE_API_KEY configured")
+        return
+
+    from data.catalog import SNEAKER_CATALOG
+    from database import get_out_of_stock_names
+    from agents.bid_agent import evaluate_bid
+
+    sneaker = "Jordan 4 Retro SB Pine Green"
+    out_of_stock = get_out_of_stock_names()
+    # Real data for this sneaker: retail $225, market $388, lowest ask $325.
+
+    lowball = evaluate_bid(sneaker, 50.0, SNEAKER_CATALOG, out_of_stock)
+    check(
+        lowball["accepted"] is False,
+        "a bid far below retail/market/lowest-ask is rejected",
+        f"got {lowball}",
+    )
+
+    fair = evaluate_bid(sneaker, 320.0, SNEAKER_CATALOG, out_of_stock)
+    check(
+        fair["accepted"] is True,
+        "a bid close to the lowest ask is accepted",
+        f"got {fair}",
+    )
+
+
+def test_brand_and_count_compliance():
+    """
+    test_brand_and_count_compliance
+    ---------------------------------
+    Live regression test for the exact reported bug: a Jordan brand filter
+    plus a Grey colorway filter, with no explicit count, was returning an
+    off-brand (Adidas) pick in the wrong color and only 2 results instead
+    of the intended default.
+
+    Confirms end-to-end that: every proposed pick matches the requested
+    brand, and the count matches what the deterministic selection logic
+    (already unit-tested above) says should be produced for this exact
+    candidate pool.
+
+    Skipped when no real GOOGLE_API_KEY is configured, since it makes live
+    Gemini calls.
+
+    Returns:
+        None. Records one result per assertion, or a single SKIP.
+    """
+    print("\nBrand/count compliance (regression for reported bug)")
+
+    if not HAS_REAL_KEY:
+        record("brand/count compliance", "SKIP", "no GOOGLE_API_KEY configured")
+        return
+
+    from data.catalog import SNEAKER_CATALOG
+    from database import get_out_of_stock_names
+    from graph import build_graph
+    from agents.selection import filter_by_brand, filter_by_color, clamp_count_to_pool, DEFAULT_PICK_COUNT
+
+    brands  = ["Jordan"]
+    colors  = ["Grey"]
+
+    # Independently compute what a correct run should produce, using the same
+    # tested pure functions the agent uses — not a hardcoded guess.
+    out_of_stock = get_out_of_stock_names()
+    candidates = [
+        (name, details) for name, details in SNEAKER_CATALOG.items()
+        if name not in out_of_stock
+    ]
+    candidates = filter_by_brand(candidates, brands)
+    candidates, _ = filter_by_color(candidates, colors)
+    expected_count = clamp_count_to_pool(DEFAULT_PICK_COUNT, len(candidates))
+
+    graph = build_graph()
+    initial_state = {
+        "input": (
+            "I'm looking for new sneakers to add to my collection. "
+            "I prefer Jordan. I like Grey colorways."
+        ),
+        "user_name": "cli_test_user",
+        "requested_brands": brands,
+        "requested_colors": colors,
+    }
+
+    final_state = {}
+    for chunk in graph.stream(initial_state, stream_mode="updates"):
+        for _, updates in chunk.items():
+            final_state.update(updates)
+
+    proposed = final_state.get("proposed_sneakers", [])
+
+    off_brand = [
+        name for name in proposed
+        if SNEAKER_CATALOG.get(name, {}).get("brand", "").lower() not in {b.lower() for b in brands}
+    ]
+    check(
+        not off_brand,
+        "every proposed pick matches the requested brand (Jordan)",
+        f"off-brand picks: {off_brand}",
+    )
 
     check(
-        total_retail <= budget,
-        "proposed picks stay within the budget",
-        f"total_retail={total_retail} budget={budget}",
+        len(proposed) == expected_count,
+        f"proposed count matches the expected default ({expected_count})",
+        f"got {len(proposed)}: {proposed}",
     )
 
 
@@ -363,7 +658,11 @@ def main():
     test_catalog_filter()
     test_user_routes()
     test_database_helpers()
+    test_selection_logic()
+    test_bid_validation()
     test_full_pipeline()
+    test_bid_fairness_judgment()
+    test_brand_and_count_compliance()
 
     passed = sum(1 for _, status, _ in RESULTS if status == "PASS")
     failed = sum(1 for _, status, _ in RESULTS if status == "FAIL")

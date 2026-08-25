@@ -21,9 +21,7 @@ BAR_WIDTH  = 20
 
 DIMENSION_LABELS = {
     "routing":           "Routing Accuracy    ",
-    "budget_accuracy":   "Budget Accuracy     ",
     "sneaker_validity":  "Sneaker Validity    ",
-    "budget_compliance": "Budget Compliance   ",
     "failure_handling":  "Failure Handling    ",
     "latency":           "Latency             ",
 }

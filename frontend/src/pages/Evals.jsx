@@ -1,19 +1,16 @@
 import { useState } from 'react'
+import { useAuth } from '../auth/AuthContext'
 
 const DIMENSION_LABELS = {
   routing:           'Routing Accuracy',
-  budget_accuracy:   'Budget Accuracy',
   sneaker_validity:  'Sneaker Validity',
-  budget_compliance: 'Budget Compliance',
   failure_handling:  'Failure Handling',
   latency:           'Latency',
 }
 
 const DIMENSION_DESC = {
   routing:           'Orchestrator routes to the right first agent',
-  budget_accuracy:   'Financial agent retrieves the correct budget',
   sneaker_validity:  'Sneaker agent avoids hallucinating names',
-  budget_compliance: 'Proposed picks stay under the user\'s budget',
   failure_handling:  'Error paths fail gracefully without crashing',
   latency:           'Full run completes within the time threshold',
 }
@@ -186,24 +183,29 @@ function CaseCard({ result, index }) {
  * and a dimension summary once all cases finish.
  */
 export default function Evals() {
-  const [running,   setRunning]   = useState(false)
-  const [cases,     setCases]     = useState([])
-  const [summary,   setSummary]   = useState(null)
-  const [error,     setError]     = useState(null)
-  const [runId,     setRunId]     = useState(0)   // force remount on new run
+  const { user, loading: authLoading } = useAuth()
+  const [running,        setRunning]        = useState(false)
+  const [cases,          setCases]          = useState([])
+  const [summary,        setSummary]        = useState(null)
+  const [error,          setError]          = useState(null)
+  const [runId,          setRunId]          = useState(0)   // force remount on new run
+  const [scenarioInput,  setScenarioInput]  = useState('')
+  const [runTotal,       setRunTotal]       = useState(7)
 
-  async function startRun() {
+  async function startRun(body) {
     setRunning(true)
     setCases([])
     setSummary(null)
     setError(null)
     setRunId(id => id + 1)
+    setRunTotal(body.custom_input ? 1 : 7)
 
     try {
       const res = await fetch('/api/evals/run', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({}),
+        method:      'POST',
+        headers:     { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body:        JSON.stringify(body),
       })
       if (!res.ok) throw new Error(`Server error: ${res.status}`)
 
@@ -244,12 +246,35 @@ export default function Evals() {
 
   const hasResults = cases.length > 0
 
+  // Avoid a flash of "access denied" while the initial /me session check is
+  // still in flight, and hard-gate the page for anyone who isn't an admin —
+  // the nav link is already hidden, but this page is reachable by direct URL.
+  if (authLoading) {
+    return <div className="container" />
+  }
+
+  if (!user?.is_admin) {
+    return (
+      <div className="container">
+        <div className="page-header">
+          <h1 className="page-title">Eval Dashboard</h1>
+        </div>
+        <div className="results-panel-empty" style={{ minHeight: 260 }}>
+          <p className="results-panel-empty-title">Admin access required</p>
+          <p className="results-panel-empty-sub">
+            The eval dashboard is only available to admin accounts.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="container">
       <div className="page-header">
         <h1 className="page-title">Eval Dashboard</h1>
         <p className="page-subtitle">
-          Run the agent harness against {8} test cases and see live scored results
+          Run the agent harness against {7} test cases and see live scored results
         </p>
       </div>
 
@@ -258,17 +283,48 @@ export default function Evals() {
         <button
           className="submit-btn"
           style={{ width: 'auto', padding: '0 32px' }}
-          onClick={startRun}
+          onClick={() => startRun({})}
           disabled={running}
         >
           {running ? 'Running evals…' : hasResults ? 'Run Again' : 'Run Evals'}
         </button>
         {running && (
           <span className="eval-progress-label">
-            {cases.length} / 8 complete
+            {cases.length} / {runTotal} complete
           </span>
         )}
       </div>
+
+      {/* Admin-only: run a free-text scenario instead of the fixed suite */}
+      {user?.is_admin && (
+        <div className="eval-scenario-panel">
+          <span className="eval-scenario-label">Admin — custom scenario</span>
+          <p className="form-section-hint">
+            Run any prompt through the full pipeline as a one-off, with no fixed
+            expected outcome. Scored only on dimensions that don't require one
+            (e.g. latency) — routing/validity checks are skipped since
+            there's nothing to compare against.
+          </p>
+          <div className="eval-scenario-row">
+            <input
+              className="picker-input"
+              type="text"
+              placeholder="e.g. find me a premium high-top statement sneaker"
+              value={scenarioInput}
+              onChange={e => setScenarioInput(e.target.value)}
+              disabled={running}
+            />
+            <button
+              className="submit-btn"
+              style={{ width: 'auto', padding: '0 24px' }}
+              onClick={() => startRun({ custom_input: scenarioInput.trim() })}
+              disabled={running || !scenarioInput.trim()}
+            >
+              Run Scenario
+            </button>
+          </div>
+        </div>
+      )}
 
       {error && (
         <p style={{ color: '#9E4040', marginTop: 16, fontSize: 14 }}>{error}</p>
@@ -333,7 +389,7 @@ export default function Evals() {
           </svg>
           <p className="results-panel-empty-title">No eval results yet</p>
           <p className="results-panel-empty-sub">
-            Click Run Evals to test the full agent pipeline against 8 automated cases
+            Click Run Evals to test the full agent pipeline against 7 automated cases
           </p>
         </div>
       )}

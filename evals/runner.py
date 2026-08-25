@@ -26,9 +26,7 @@ from evals import scorers as sc
 # Maps scorer names to the functions in scorers.py
 SCORER_FNS = {
     "routing":           sc.score_routing,
-    "budget_accuracy":   sc.score_budget_accuracy,
     "sneaker_validity":  sc.score_sneaker_validity,
-    "budget_compliance": sc.score_budget_compliance,
     "failure_handling":  sc.score_failure_handling,
     "latency":           sc.score_latency,
 }
@@ -89,7 +87,7 @@ def _run_one_case(app, case, verbose=False):
         "user_name": case["user_name"],
     }
 
-    nodes_visited  = []   # order agents ran, e.g. ["orchestrator", "financial_agent", ...]
+    nodes_visited  = []   # order agents ran, e.g. ["orchestrator", "sneaker_agent", ...]
     node_outputs   = {}   # {node_name: state_updates_dict}
     node_latencies = {}   # {node_name: seconds_float}
     final_state    = {}   # merged final state built from all node updates

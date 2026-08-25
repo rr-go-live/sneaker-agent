@@ -12,21 +12,22 @@ HOW THE EVAL WORKS
 For each test case the runner:
   1. Sends the input through the full LangGraph agent graph
   2. Captures which nodes ran, in what order, and how long each took
-  3. Runs up to 6 scorers against the result:
+  3. Runs up to 4 scorers against the result:
 
      Routing Accuracy    — did the orchestrator pick the right first agent?
-     Budget Accuracy     — did financial_agent find the correct budget?
      Sneaker Validity    — are all proposed sneakers real catalog items (no hallucination)?
-     Budget Compliance   — does the total retail price stay within the user's budget?
      Failure Handling    — does the system fail gracefully when something goes wrong?
      Latency             — did the full run finish within the acceptable time window?
 
   4. Averages all applicable scores into a per-case overall score
   5. Aggregates scores per dimension across all cases for the final report
 
+  There is no budget concept in this app, so there's no budget-related
+  scoring dimension.
+
 USAGE
 -----
-  python eval_runner.py                 # run all 8 test cases
+  python eval_runner.py                 # run all 7 test cases
   python eval_runner.py --id TC-001     # run one specific test case
   python eval_runner.py --verbose       # show agent logs during runs
 """

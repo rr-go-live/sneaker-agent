@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import SneakerCard from '../components/SneakerCard'
 import FilterBar from '../components/FilterBar'
+import { useAuth } from '../auth/AuthContext'
 
 const PAGE_SIZE = 24
 
@@ -9,9 +10,12 @@ const PAGE_SIZE = 24
  * -------
  * Browse page — fetches the full sneaker catalog from the API and displays it
  * as a searchable, filterable, paginated grid. All filtering happens
- * client-side; only PAGE_SIZE cards are rendered at a time.
+ * client-side; only PAGE_SIZE cards are rendered at a time. A purchase or
+ * bid credits the logged-in viewer's wardrobe; SneakerCard itself prompts
+ * a logged-out viewer to log in before either action is available.
  */
 export default function Catalog() {
+  const { user } = useAuth()
   const [allSneakers, setAllSneakers] = useState([])
   const [loading, setLoading]         = useState(true)
   const [error, setError]             = useState(null)
@@ -168,7 +172,7 @@ export default function Catalog() {
                 <p className="empty-state-sub">Try adjusting your search or filters</p>
               </div>
             ) : (
-              pageItems.map(s => <SneakerCard key={s.name} sneaker={s} />)
+              pageItems.map(s => <SneakerCard key={s.name} sneaker={s} username={user?.username || null} />)
             )}
           </div>
 

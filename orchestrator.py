@@ -11,14 +11,16 @@ def orchestrator(state):
     The first node that runs on every request. Uses the LLM to read the user's
     message and decide which agent should handle it.
 
-    The four agents it can route to:
-      - financial_agent  → user wants to buy sneakers or add to their collection
-      - sneaker_agent    → user wants style/trend advice only, no buying intent
+    The three agents it can route to:
+      - sneaker_agent    → user wants recommendations, style/trend advice, or
+                           to add to their collection — anything sneaker-related
+                           that isn't specifically about their existing
+                           collection or a named item's stock status
       - inventory_agent  → user wants to know what sneakers they already own
       - logistics_agent  → user asks if a specific named sneaker is in stock
 
-    A guardrail ensures only recognised agent names are accepted. Unknown answers
-    fall back to financial_agent.
+    A guardrail ensures only recognised agent names are accepted. Unknown
+    answers fall back to sneaker_agent.
 
     Args:
         state (AgentState): reads 'input'
@@ -34,9 +36,8 @@ def orchestrator(state):
 You are a sneaker shopping assistant orchestrator. Pick which agent should handle the user's request.
 
 Agents:
-- financial_agent  → user wants to buy sneakers, get recommendations, or add to their collection
-                     (always use this first when there is any buying or shopping intent)
-- sneaker_agent    → user ONLY wants style or trend advice with no intent to purchase
+- sneaker_agent    → user wants recommendations, style/trend advice, or to add
+                     to their collection (the default for anything sneaker-related)
 - inventory_agent  → user wants to know what sneakers they already own
 - logistics_agent  → user asks if a specific named sneaker is currently available in the store
 
@@ -45,23 +46,19 @@ User input: {user_input}
 Respond in EXACTLY this format:
 REASONING: <2-3 sentences explaining which intent you detected in the user's
 message and why it maps to the agent you chose>
-ANSWER: <one of: financial_agent, sneaker_agent, inventory_agent, logistics_agent>
+ANSWER: <one of: sneaker_agent, inventory_agent, logistics_agent>
 """)
     ])
 
     reasoning, answer = split_reasoning_answer(decision.content)
     llm_answer = answer.lower()
 
-    if "financial_agent" in llm_answer:
-        next_step = "financial_agent"
-    elif "inventory_agent" in llm_answer:
+    if "inventory_agent" in llm_answer:
         next_step = "inventory_agent"
     elif "logistics_agent" in llm_answer:
         next_step = "logistics_agent"
-    elif "sneaker_agent" in llm_answer:
-        next_step = "sneaker_agent"
     else:
-        next_step = "financial_agent"
+        next_step = "sneaker_agent"
 
     return {"next": next_step, "reasoning": reasoning}
 

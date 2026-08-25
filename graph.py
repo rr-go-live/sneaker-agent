@@ -3,7 +3,6 @@ from langgraph.graph import StateGraph, END
 from state import AgentState
 from orchestrator import orchestrator, router
 from agents import (
-    financial_agent,
     sneaker_agent,
     inventory_agent,
     logistics_agent,
@@ -18,9 +17,8 @@ def build_graph():
     Constructs and compiles the LangGraph agent graph.
 
     Flow:
-      orchestrator → financial_agent | inventory_agent | sneaker_agent | logistics_agent
-      financial_agent  → sneaker_agent
-      inventory_agent  → financial_agent | END
+      orchestrator     → inventory_agent | sneaker_agent | logistics_agent
+      inventory_agent  → sneaker_agent | END
       sneaker_agent    → critique_agent
       critique_agent   → logistics_agent (approved / max retries reached)
                        → sneaker_agent   (rejected, retry available)
@@ -38,7 +36,6 @@ def build_graph():
     graph = StateGraph(AgentState)
 
     graph.add_node("orchestrator",    orchestrator)
-    graph.add_node("financial_agent", financial_agent)
     graph.add_node("sneaker_agent",   sneaker_agent)
     graph.add_node("inventory_agent", inventory_agent)
     graph.add_node("critique_agent",  critique_agent)
@@ -50,21 +47,9 @@ def build_graph():
         "orchestrator",
         router,
         {
-            "financial_agent":  "financial_agent",
             "sneaker_agent":    "sneaker_agent",
             "inventory_agent":  "inventory_agent",
             "logistics_agent":  "logistics_agent",
-        },
-    )
-
-    graph.add_conditional_edges(
-        "financial_agent",
-        router,
-        {
-            "sneaker_agent":    "sneaker_agent",
-            "inventory_agent":  "inventory_agent",
-            "logistics_agent":  "logistics_agent",
-            END: END,
         },
     )
 
@@ -72,7 +57,6 @@ def build_graph():
         "inventory_agent",
         router,
         {
-            "financial_agent":  "financial_agent",
             "sneaker_agent":    "sneaker_agent",
             END: END,
         },
