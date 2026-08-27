@@ -318,7 +318,8 @@ async def run_evals(body: EvalRunRequest, request: Request):
       {"type": "eval_case",    "id": "...", "name": "...", "passed": bool,
        "overall_score": float, "total_latency": float,
        "nodes_visited": [...], "node_latencies": {...},
-       "scores": {...}, "output": "...", "error": "..."|null}
+       "scores": {...}, "output": "...", "availability": [...],
+       "retail_total": float|null, "error": "..."|null}
       {"type": "eval_summary", "total": int, "passed": int,
        "avg_score": float,     "total_time": float,
        "dimension_scores": {dim: {"avg": float, "pass_count": int, "total": int}}}
@@ -419,6 +420,10 @@ async def run_evals(body: EvalRunRequest, request: Request):
                 "node_latencies": result["node_latencies"],
                 "scores":        scores,
                 "output":        result["final_state"].get("output", ""),
+                # Structured stock rows so the dashboard can render a table
+                # instead of re-parsing the plain-text report.
+                "availability":  result["final_state"].get("availability") or [],
+                "retail_total":  result["final_state"].get("retail_total"),
                 "error":         result.get("error"),
             }
             yield f"data: {json.dumps(event)}\n\n"

@@ -3,12 +3,14 @@
 This project has two complementary test layers:
 
 1. **CLI test harness** ([`cli_test.py`](cli_test.py)) — fast structural and
-   integration checks (parser, API routes, database, and one full pipeline
-   run). Run it with `python cli_test.py`. See
-   [CLI Test Harness](#cli-test-harness-cli_testpy) below.
-2. **Eval harness** — quality scoring of the multi-agent routing and picks
-   across realistic prompts. Run the full suite with `python eval_runner.py`
-   or a single case with `python eval_runner.py --id TC-001`.
+   integration checks (parser, API routes, database, selection logic, bid
+   validation/fairness, and one full pipeline run). Run it with
+   `python cli_test.py`. See [CLI Test Harness](#cli-test-harness-cli_testpy)
+   below.
+2. **Eval harness** — quality scoring across realistic prompts, covering both
+   the multi-agent graph (routing, picks) and the standalone bid_agent
+   (fairness). Run the full suite with `python eval_runner.py` or a single
+   case with `python eval_runner.py --id TC-001`.
 
 ---
 
@@ -17,12 +19,21 @@ This project has two complementary test layers:
 There is no budget concept in this app — sneaker_agent has no price ceiling,
 so there's no "budget accuracy" or "budget compliance" dimension.
 
-| Dimension | What it checks | Agents involved |
+The eval harness runs two kinds of test cases (see `kind` in
+[evals/cases.py](evals/cases.py)): `"graph"` (default) streams the full
+LangGraph pipeline; `"bid"` calls `bid_agent.evaluate_bid()` directly, since
+bidding targets one already-known sneaker rather than a routing decision.
+Both kinds are scored and reported the same way.
+
+| Dimension | What it checks | Applies to |
 |---|---|---|
-| Routing Accuracy | Did the orchestrator pick the correct first agent? | orchestrator |
-| Sneaker Validity | Are all proposed sneakers real catalog items (no hallucination)? | sneaker_agent |
-| Failure Handling | Does the system return a graceful error message instead of crashing? | (none currently exercise this — see TC list below) |
-| Latency | Did the full run finish within the acceptable time window (< 15s)? | all |
+| Routing Accuracy | Did the orchestrator pick the correct first agent? | graph cases |
+| Sneaker Validity | Are all proposed sneakers real catalog items (no hallucination)? | graph cases with `expect_proposed_sneakers` |
+| Expected Pick | Does one specific catalog name actually appear in the picks? Stronger than Sneaker Validity — validity only rules out hallucination, this checks the *right* answer was found. | graph cases with `expected_pick_included` |
+| Constraint Fidelity | Does **every** pick satisfy the brand, silhouette, price ceiling and release year the user stated? The end-to-end guard on free-text constraint extraction. | graph cases with `expected_constraints` |
+| Bid Fairness | Does bid_agent accept/reject in line with real market data? | bid cases with `expected_accepted` |
+| Failure Handling | Does the system return a graceful error message instead of crashing? | cases with `is_failure_case: True` |
+| Latency | Did the full run finish within the acceptable time window (< 15s pass, < 30s warn)? | all |
 
 ---
 
@@ -65,9 +76,9 @@ so there's no "budget accuracy" or "budget compliance" dimension.
 | Expected first agent | inventory_agent |
 | Expect proposed sneakers | Yes |
 
-**What it validates:** The most complex routing path. The request contains both "see collection" and "buy new" intent. The orchestrator must detect the inventory-check intent first.
+**What it validates:** The most complex routing path. The request contains both "see collection" and "buy new" intent. inventory_agent must run first.
 
-**Known failure mode:** When both intents are present, the orchestrator sometimes routes to sneaker_agent first (skipping inventory_agent). This is a genuine routing ambiguity — the eval harness surfaces it consistently. **Fix**: strengthen the orchestrator routing prompt to prioritize inventory_agent when "already own" language appears.
+**Formerly a real, non-flaky bug:** the LLM-based orchestrator routed this to sneaker_agent 5/5 runs, skipping inventory_agent entirely — its prompt calls sneaker_agent "the default for anything sneaker-related," which biased it away from inventory_agent whenever shopping language was present at all. **Fixed** with a deterministic pre-check, `orchestrator._mentions_existing_collection` — collection-referencing language now routes straight to inventory_agent without an LLM call at all, so this case is no longer subject to LLM judgment. See [section 12](#12-orchestrator-collection-routing-orchestrator_mentions_existing_collection) below.
 
 ---
 
@@ -123,12 +134,128 @@ so there's no "budget accuracy" or "budget compliance" dimension.
 
 ---
 
+### TC-008 — Lowball Bid Rejected
+| Field | Value |
+|---|---|
+| Kind | bid |
+| Input | Bid $50.00 on Jordan 4 Retro SB Pine Green (retail $225, market $388, lowest ask $325) |
+| Expected outcome | Rejected |
+
+**What it validates:** `bid_agent`'s fairness judgment actually discriminates on real pricing data — a bid far below every reference price is not fair to the seller.
+
+---
+
+### TC-009 — Fair Bid Accepted
+| Field | Value |
+|---|---|
+| Kind | bid |
+| Input | Bid $320.00 on Jordan 4 Retro SB Pine Green (same sneaker as TC-008) |
+| Expected outcome | Accepted |
+
+**What it validates:** A bid close to the lowest ask is accepted, proving the judgment isn't just rejecting everything. Both this and TC-008 restock the sneaker to quantity 1 before running (via `database.restock_sneaker`) so the result never depends on whatever a prior manual purchase left the live dev database at.
+
+---
+
+### TC-010 — Bid on Unknown Sneaker Rejected
+| Field | Value |
+|---|---|
+| Kind | bid |
+| Input | Bid $500.00 on "Definitely Not A Real Sneaker XYZ" |
+| Expected outcome | Rejected, deterministically — no LLM call |
+| Is failure case | Yes — `expected_output_contains: "not a real catalog item"` |
+
+**What it validates:** `validate_bid_request` catches an invalid target before any market judgment is attempted.
+
+---
+
+### TC-011 — Highest Retail Jordans Post-2022
+| Field | Value |
+|---|---|
+| Input | "Get me the single highest retail value Jordan released after 2022" |
+| Expected first agent | sneaker_agent |
+| Expected pick included | "Jordan 1 Low SE True Blue" |
+| Expected constraints | brand Jordan, released 2022 or later |
+
+**What it validates:** a superlative combined with a date filter. Previously a
+documented known-limitation case: with no release-year filter and no
+retail-price sort, candidates were ranked by popularity and capped at
+`MAX_CATALOG_SIZE` (80), so the correct answer — "Jordan 1 Low SE True Blue"
+($1,110 retail, released 2022-06-22), ranked **#197 of 538** in-stock Jordans
+by popularity — never reached the LLM at all. `extract_min_release_year` +
+`extract_sort_preference` + `sort_candidates` closed that gap. Ordering must
+happen *before* the cap, which is the whole point of this case.
+
+---
+
+### TC-012 — Free-Text Brand + Silhouette + Budget
+| Field | Value |
+|---|---|
+| Input | "get me a low top jordan sneaker that I can get with 150 dollars" |
+| Expected constraints | brand Jordan, low profile, retail ≤ $150 |
+
+**What it validates:** the exact query that surfaced this whole class of bug.
+The admin Custom Scenario panel sends only a raw string with no structured
+filter fields, so brand, silhouette and price all have to be parsed from
+prose. Before `extract_requested_brands` existed, this returned Nike and
+adidas picks for a query that plainly said "jordan" — and the prompt actively
+told the LLM to "favor variety across brands", steering it further away.
+
+---
+
+### TC-013 — Cheapest New Balance
+| Field | Value |
+|---|---|
+| Input | "what is the cheapest New Balance you have" |
+| Expected constraints | brand New Balance |
+
+**What it validates:** the opposite sort direction from TC-011, plus a
+multi-word brand matched as a phrase.
+
+---
+
+### TC-014 — Colorway + Brand + Budget Stack
+| Field | Value |
+|---|---|
+| Input | "I want black Nike low tops under 120 dollars" |
+| Expected constraints | brand Nike, low profile, retail ≤ $120 |
+
+**What it validates:** several constraints stacked in one sentence — the way
+a real shopper actually types — all surviving to the final picks.
+
+---
+
+### TC-015 — Impossible Budget Fails Honestly
+| Field | Value |
+|---|---|
+| Input | "find me a jordan under 10 dollars" |
+| Expect proposed sneakers | No |
+| Is failure case | Yes — `expected_output_contains: "No in-stock sneakers matched"` |
+
+**What it validates:** a constraint nothing in the catalog satisfies must
+produce an honest, specific empty result naming which filters failed — never
+a silent substitution of off-brand or over-budget picks. This case caught
+three real bugs on its first run:
+
+1. `filter_by_max_price` treated `retail_price: 0.0` (10 catalog entries,
+   meaning *unknown*) as satisfying any ceiling, so a $0 shoe passed an
+   "under $10" filter.
+2. `logistics_agent` overwrote sneaker_agent's specific explanation with a
+   generic "No sneakers to check availability for."
+3. `critique_agent` spun its full retry loop on an unsatisfiable request and
+   then force-approved with "Picks approved after review.", replacing the
+   explanation entirely. It now short-circuits on the `no_matches` flag,
+   which also cut this case's runtime from 7.7s to 1.1s.
+
+---
+
 ## Running Results Interpretation
 
 - **All dimensions 100%** — pipeline is healthy
-- **Routing Accuracy drops** — orchestrator prompt needs tuning; check which query types misroute
+- **Routing Accuracy drops** — check `orchestrator._mentions_existing_collection` first if the miss involves collection language; otherwise the LLM routing prompt needs tuning for the query type that misrouted
 - **Sneaker Validity drops** — LLM is hallucinating catalog names; the catalog-validation logic in sneaker_agent may need strengthening
-- **Failure Handling shows n/a** — expected; no current test case sets `is_failure_case: True` since there's no unresolvable-budget error path anymore. Add one back if a real failure path is introduced.
+- **Constraint Fidelity drops** — free-text extraction in `agents/selection.py` missed a constraint, or a filter regressed; check which constraint the failing pick violated (the reason string names it)
+- **Bid Fairness drops** — bid_agent's LLM judgment is misreading market data, or `validate_bid_request`'s deterministic checks regressed
+- **Failure Handling shows n/a** — expected when no test case in the current run sets `is_failure_case: True`
 - **Latency drops** — LLM API is slow; check model tier or reduce prompt length
 
 ---
@@ -242,6 +369,128 @@ mentioning both preferences, no explicit count.
 | 7.2 | Proposed count matches what `clamp_count_to_pool(5, pool_size)` computes independently | Default count of 5 is honored, not silently truncated |
 
 **Skip condition:** same as above — `SKIP` without a real `GOOGLE_API_KEY`.
+
+## 8. Bid agent (`agents/bid_agent.py`)
+
+Bidding targets one already-known sneaker and runs standalone, outside the
+LangGraph pipeline — `api.py` calls `bid_agent.evaluate_bid()` directly.
+
+**8a. Deterministic pre-checks (`validate_bid_request`)** — no LLM or
+database calls, fast and fully deterministic:
+
+| # | Case | Expected output |
+|---|------|-----------------|
+| 8.1 | Sneaker not in the catalog | Rejected, with a reason |
+| 8.2 | Sneaker in the catalog but out of stock | Rejected, with a reason |
+| 8.3 | Bid amount is zero or negative | Rejected, with a reason |
+| 8.4 | Real, in-stock sneaker with a positive bid | Passes validation |
+
+**8b. Fairness judgment (`evaluate_bid`, live LLM)** — restocks "Jordan 4
+Retro SB Pine Green" to quantity 1 first (via `database.restock_sneaker`) so
+the result never depends on whatever a prior manual purchase left the live
+dev database at. Real data for this sneaker: retail $225, market $388,
+lowest ask $325.
+
+| # | Bid | Expected outcome |
+|---|-----|-------------------|
+| 8.5 | $50.00 | Rejected — far below retail/market/lowest-ask |
+| 8.6 | $320.00 | Accepted — close to the lowest ask |
+
+**Skip condition:** 8b is `SKIP` without a real `GOOGLE_API_KEY`, since it
+makes live Gemini calls. 8a always runs.
+
+## 9. Query understanding (`agents/selection.py` extractors)
+
+Parses brand, color, silhouette, price ceiling, release year and sort
+preference out of free text. A constraint reaches the agent either as a
+structured field from the Advisor UI's filter chips, or named in prose from
+the free-text box, the admin Custom Scenario panel, or the CLI. Only the
+structured path used to be honored.
+
+No LLM or database calls — fast and fully deterministic.
+
+| # | Case | Expected | Edge case covered |
+|---|------|----------|--------------------|
+| 9.1 | "get me a low top jordan" | brand Jordan | brand named in prose |
+| 9.2 | "3 pairs of grey jordans" | brand Jordan | plural brand mention |
+| 9.3 | "jordan's are my favorite" | brand Jordan | possessive brand mention |
+| 9.4 | "the cheapest new balance" | brand New Balance | multi-word brand matched as a phrase |
+| 9.5 | "no jordans please" | no brand | negation must not invert into a filter |
+| 9.6 | "anything but adidas" | no brand | exclusion phrasing |
+| 9.7 | "I already own nikes" | no brand | owning a brand is not a request for it |
+| 9.8 | "red and black colorway" | black + red | multiple colors in one request |
+| 9.9 | "low tops" / "high-top" | low / high | plain and hyphenated silhouettes |
+| 9.10 | 7 budget phrasings | correct ceiling | "with 150 dollars", "under 100", "nothing over $200", "300 dollars max", "I have 250 bucks", "budget of 300", "$180 or less" |
+| 9.11 | "sneakers with 3 stripes" | no budget | a bare number with no currency marker must not parse as $3 |
+| 9.12 | "size 10 low tops" | no budget | a shoe size is not a budget |
+| 9.13 | "released after 2022" / "from 2023 onwards" | 2022 / 2023 | release-year floor |
+| 9.14 | "most expensive" / "highest retail value" | retail_desc | superlative re-ranks the pool |
+| 9.15 | "cheapest" | retail_asc | opposite direction |
+| 9.16 | "300 dollars max" | no sort | a price ceiling is not a request for the priciest shoe |
+
+## 10. Constraint filters (`agents/selection.py` filters + ordering)
+
+Applies the extracted constraints to the candidate pool. The ordering tests
+matter more than they look: the pool is capped at `MAX_CATALOG_SIZE` before
+the LLM sees it, so an unsorted superlative query's correct answer can sit
+outside the window and never reach the model.
+
+| # | Function | Case | Edge case covered |
+|---|----------|------|--------------------|
+| 10.1 | `filter_by_profile` | zero matches | returns empty, never a different silhouette |
+| 10.2 | `filter_by_max_price` | ceiling is inclusive | `<=`, not `<` |
+| 10.3 | `filter_by_max_price` | `retail_price: 0.0` | 0 means *unknown*, not free — must not satisfy an arbitrary ceiling (10 real catalog entries have this) |
+| 10.4 | `filter_by_release_year` | entry with no `release_date` | excluded — an unknown date can't be confirmed to match |
+| 10.5 | `sort_candidates` | retail_desc / retail_asc | highest / lowest retail first |
+| 10.6 | `sort_candidates` | unknown price under retail_asc | sorts last, so "the cheapest" is never a shoe whose price nobody knows |
+| 10.7 | `sort_candidates` | default | popularity (`sales_this_period`) |
+| 10.8 | `sort_candidates` | — | does not mutate the caller's list |
+
+## 11. Availability report (`agents/logistics_agent.py`)
+
+`logistics_agent` emits its report in two shapes, because two consumers need
+it differently: structured rows (`availability`) that the web dashboard
+renders as a table, and an aligned plain-text version (`output`) for the CLI
+and eval report, which have no table to render into. Neither includes the
+raw StockX URL — it is long enough to dominate a line and adds nothing the
+sneaker name doesn't already convey. The UI turns the `link` field into a
+short "StockX ↗" link instead.
+
+Tests target `_format_report_text`, a pure function — no LLM or database calls.
+
+| # | Case | Expected |
+|---|------|----------|
+| 11.1 | Any report | contains no `stockx.com` URL |
+| 11.2 | In-stock and out-of-stock rows | each row shows its live status |
+| 11.3 | Sneaker absent from the catalog | reported explicitly, not silently dropped |
+| 11.4 | Any report | includes the estimated retail total |
+| 11.5 | Names of differing length | columns still align (measured by the retail column offset) |
+| 11.6 | Empty row list | readable message, not an empty report |
+
+## 12. Orchestrator collection routing (`orchestrator._mentions_existing_collection`)
+
+Regression test for a real, non-flaky bug: the orchestrator's LLM routing
+call sent a compound request — referencing the existing collection AND
+asking for new picks — to `sneaker_agent` 5/5 times, skipping
+`inventory_agent` entirely (see TC-003, and the README's Eval Harness
+section for the full writeup). Its prompt calls `sneaker_agent` "the
+default for anything sneaker-related," which biased it away from
+`inventory_agent` whenever shopping language was present at all.
+
+`_mentions_existing_collection` closes this deterministically — matching
+text routes straight to `inventory_agent` without an LLM call, and
+`inventory_agent`'s own downstream check hands off to `sneaker_agent` if it
+detects shopping intent too.
+
+Pure function — no LLM calls, so this covers the routing decision without
+depending on live model output.
+
+| # | Case | Expected | Edge case covered |
+|---|------|----------|--------------------|
+| 12.1 | The exact TC-003 input (collection + shopping in one message) | routes to inventory_agent | the original bug report |
+| 12.2 | "what is in my collection" / "see my collection" / "check my current collection" | routes to inventory_agent | viewing-verb phrasings |
+| 12.3 | "add to my collection" / "new heat for my collection" | does NOT route to inventory_agent | "collection" as a shopping target, not a check, must not false-positive |
+| 12.4 | Style/stock/minimal queries with no collection language | does NOT route to inventory_agent | no false positives on unrelated requests |
 
 ## Maintenance
 

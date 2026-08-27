@@ -24,13 +24,39 @@ class AgentState(TypedDict):
                                            agent that just ran made its decision;
                                            streamed to the UI logging panel so the
                                            user can follow the LLM's logic
-        requested_brands   (list[str]):    brand filter selected in the UI, e.g.
-                                           ["Jordan"]; hard-filtered in
-                                           sneaker_agent, not left to the LLM
-        requested_colors   (list[str]):    colorway filter selected in the UI
+        requested_brands   (list[str]):    brand filter, e.g. ["Jordan"]. Set
+                                           from the UI's brand chips, or parsed
+                                           out of free text by sneaker_agent
+                                           when no chip was selected; either way
+                                           it is hard-filtered in sneaker_agent
+                                           rather than left to the LLM.
+                                           sneaker_agent writes the resolved
+                                           value back so critique_agent enforces
+                                           the same brand rule.
+        requested_colors   (list[str]):    colorway filter, resolved the same way
+        requested_profile  (str|None):     silhouette filter — "low", "mid", or
+                                           "high"; resolved the same way
         requested_count    (int|None):     explicit pick count parsed from the
                                            request; None lets sneaker_agent use
                                            its own default
+        availability       (list|None):    structured stock rows from
+                                           logistics_agent — one dict per pick
+                                           with name, brand, in_stock, quantity,
+                                           retail, market and link. The web UI
+                                           renders these as a table; 'output'
+                                           carries the same data as plain text
+                                           for the CLI and eval report.
+        retail_total       (float|None):   summed retail price of the picks
+        no_matches         (bool|None):    set by sneaker_agent when nothing in
+                                           the catalog satisfies the stated
+                                           constraints. Tells critique_agent to
+                                           skip its retry loop — a retry cannot
+                                           conjure a match — and to preserve the
+                                           explanation of which filters failed
+
+    Price ceilings and release-year floors are parsed per-request inside
+    sneaker_agent rather than carried here, since nothing downstream needs to
+    re-check them — the candidate pool physically cannot contain a violation.
     """
     input:              str
     user_name:          str
@@ -43,4 +69,8 @@ class AgentState(TypedDict):
     reasoning:          Optional[str]
     requested_brands:   list
     requested_colors:   list
+    requested_profile:  Optional[str]
     requested_count:    Optional[int]
+    availability:       Optional[list]
+    retail_total:       Optional[float]
+    no_matches:         Optional[bool]

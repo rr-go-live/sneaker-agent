@@ -1,6 +1,6 @@
 # Sneaker Agent — Multi-Agent System with React UI
 
-A multi-agent AI system built with **LangGraph**, **Gemini Flash**, **FastAPI**, and **React**. Specialized agents collaborate through shared state to handle the full sneaker shopping experience — routing, inventory review, recommendation, critique, bidding, and logistics. There is no budget/price ceiling anywhere in the app — any sneaker can be searched for and added to a wardrobe regardless of cost; retail/market price is still shown throughout as reference data. Adding a sneaker to a wardrobe decrements it from the shared inventory. A built-in **eval harness** scores the pipeline across four dimensions.
+A multi-agent AI system built with **LangGraph**, **Gemini Flash**, **FastAPI**, and **React**. Specialized agents collaborate through shared state to handle the full sneaker shopping experience — routing, inventory review, recommendation, critique, bidding, and logistics. There is no *account budget* — no balance is tracked and nothing is unaffordable, so any sneaker can be searched for and added to a wardrobe. Retail and market price are shown throughout as reference data, and a price ceiling the shopper states themselves ("under $150") is honored as a filter like any other constraint. Adding a sneaker to a wardrobe decrements it from the shared inventory. A built-in **eval harness** scores the pipeline across seven dimensions.
 
 ---
 
@@ -40,10 +40,10 @@ Bidding runs outside the graph:
 | Agent               | Responsibility                                                                                                                                           |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `orchestrator`    | Routes the user's request to the right first agent using the LLM                                                                                         |
-| `sneaker_agent`   | Hard-filters the catalog by requested brand/color, then asks the LLM to pick from that pool to match style; accepts critique feedback on retry            |
+| `sneaker_agent`   | Resolves the shopper's constraints — brand, colorway, silhouette, price ceiling, release year, ordering — from the UI's filter chips *or* from free text, hard-filters the catalog to match, then asks the LLM to pick from that pool for style; accepts critique feedback on retry |
 | `inventory_agent` | Reviews owned collection; uses LLM to decide whether to continue shopping                                                                                |
 | `critique_agent`  | Deterministically checks pick count and brand compliance, then asks the LLM to judge value and (when no brand was requested) brand diversity — approves or rejects with a reason, up to 2 retries before force-approving |
-| `logistics_agent` | Checks live DB inventory, shows retail vs market value, outputs StockX links                                                                             |
+| `logistics_agent` | Checks live DB inventory and reports retail vs market value. Emits structured rows the web UI renders as a table, plus an aligned plain-text version for the CLI |
 | `bid_agent`       | Standalone (not part of the graph) — deterministically rejects invalid bids, then asks the LLM to judge fairness against real market data for one sneaker the user already picked |
 
 Sneaker data comes from `data/sneakerdata.json` — **1,668 real sneakers** with full StockX market data (retail price, market value, last sale, lowest ask, deadstock sold).
@@ -91,24 +91,30 @@ Passwords are never stored in plaintext — [auth.py](auth.py) hashes them with 
 
 ## Eval Harness
 
-The eval harness runs the agent graph against 8 test cases and scores each run on 6 dimensions.
+The eval harness scores 15 test cases across 7 dimensions. Most run the full
+agent graph; three run `bid_agent` directly, since bidding targets one
+already-known sneaker rather than a routing decision (see `kind` in
+[evals/cases.py](evals/cases.py)).
 
 ```bash
-python eval_runner.py                # run all 8 test cases
+python eval_runner.py                # run all 15 test cases
 python eval_runner.py --id TC-001   # run one specific test case
 python eval_runner.py --verbose     # show agent logs during runs
 ```
 
 ### Scoring Dimensions
 
-| Dimension                   | What it checks                                                            |
-| --------------------------- | ------------------------------------------------------------------------- |
-| **Routing Accuracy**  | Did the orchestrator pick the right first agent?                          |
-| **Sneaker Validity**  | Are all proposed sneakers real catalog items? (catches hallucination)     |
-| **Failure Handling**  | Does the system return a readable error instead of crashing on bad input? |
-| **Latency**           | Did the full run finish under the 15-second threshold?                    |
+| Dimension                  | What it checks                                                              | Applies to           |
+| --------------------------- | ---------------------------------------------------------------------------- | --------------------- |
+| **Routing Accuracy**  | Did the orchestrator pick the right first agent?                            | graph cases           |
+| **Sneaker Validity**  | Are all proposed sneakers real catalog items? (catches hallucination)       | graph cases           |
+| **Expected Pick**     | Does one specific correct catalog item actually appear in the picks?        | graph cases           |
+| **Constraint Fidelity** | Does every pick honor the brand, silhouette, price ceiling and release year the user asked for? | graph cases |
+| **Bid Fairness**      | Does `bid_agent` accept/reject in line with real market data?             | bid cases             |
+| **Failure Handling**  | Does the system return a readable error instead of crashing on bad input?   | any                    |
+| **Latency**           | Did the full run finish under the 15-second threshold?                      | all                    |
 
-There is no budget concept in this app, so there's no budget-related scoring dimension.
+There is no account-budget concept, so nothing scores "can the user afford this". A stated ceiling is scored under Constraint Fidelity, alongside brand and silhouette.
 
 ### Example Report
 
@@ -116,29 +122,42 @@ There is no budget concept in this app, so there's no budget-related scoring dim
 ==============================================================================
   SNEAKER AGENT — EVAL REPORT
 ==============================================================================
-  7 test cases  |  6/7 passed  |  total time: 48.6s  |  overall score: 97%
+  15 test cases  |  15/15 passed  |  total time: 161.8s  |  overall score: 93%
 
 ------------------------------------------------------------------------------
   ID        Test Case                               Score    Time  Status
 ------------------------------------------------------------------------------
-  TC-001    Direct shopping request                 100%   12.8s  PASS
-  TC-002    Collection check only — no shopping     100%    5.2s  PASS
-  TC-003    Inventory review then shopping           80%   11.1s  FAIL
-  TC-004    Style advice request                    100%    9.4s  PASS
-  TC-005    Stock availability check                100%    0.8s  PASS
-  TC-006    Alice shopping request                  100%    9.7s  PASS
-  TC-007    Minimal query — no crash                100%    9.9s  PASS
+  TC-001    Direct shopping request                 100%   12.4s  PASS
+  TC-002    Collection check only — no shopping     100%    3.5s  PASS
+  TC-003    Inventory review then shopping           83%   20.4s  PASS
+  TC-004    Style advice request                    100%   11.1s  PASS
+  TC-005    Stock availability check                100%    1.0s  PASS
+  TC-006    Alice shopping request                   83%   15.2s  PASS
+  TC-007    Minimal query — no crash                 50%   19.9s  PASS
+  TC-008    Lowball bid rejected                    100%    2.5s  PASS
+  TC-009    Fair bid accepted                       100%    3.0s  PASS
+  TC-010    Bid on unknown sneaker rejected         100%    0.0s  PASS
+  TC-011    Highest retail Jordans post-2022        100%   10.9s  PASS
+  TC-012    Free-text brand + silhouette + budget    88%   27.9s  PASS
+  TC-013    Cheapest New Balance                    100%    8.0s  PASS
+  TC-014    Colorway + brand + budget stack          88%   25.0s  PASS
+  TC-015    Impossible budget fails honestly        100%    1.3s  PASS
 
 ------------------------------------------------------------------------------
   SCORES BY DIMENSION
 ------------------------------------------------------------------------------
-  Routing Accuracy      █████████████████░░░  6/7 cases  86%
-  Sneaker Validity      ████████████████████  5/5 cases  100%
-  Failure Handling      ────────────────────  0/0 cases   n/a
-  Latency               ████████████████████  7/7 cases  100%
+  Routing Accuracy      ████████████████████  11/11 cases  100%
+  Sneaker Validity      ████████████████████  8/8 cases  100%
+  Expected Pick         ████████████████████  1/1 cases  100%
+  Constraint Fidelity   ████████████████████  4/4 cases  100%
+  Bid Fairness          ████████████████████  3/3 cases  100%
+  Failure Handling      ████████████████████  2/2 cases  100%
+  Latency               █████████████████░░░  10/15 cases  83%
 ```
 
-**TC-003 failure is a real finding:** when both "see my collection" and "buy new" intent appear in one message, the orchestrator sometimes routes to `sneaker_agent` first and skips `inventory_agent`. The eval surfaces this consistently — the fix is to strengthen the orchestrator prompt to detect collection-check language before shopping language.
+**TC-003 was a real, non-flaky bug, now fixed:** a compound request — one that both references the existing collection AND asks for new picks — was routed to `sneaker_agent` by the LLM orchestrator 5/5 times, skipping `inventory_agent` entirely. Its prompt calls `sneaker_agent` "the default for anything sneaker-related," which biased it away from `inventory_agent` whenever shopping language was present at all, with no rule for handling both intents in one message. Fixed with a deterministic pre-check (`orchestrator._mentions_existing_collection`) that routes collection-referencing language straight to `inventory_agent` without an LLM call — `inventory_agent`'s own downstream check still hands off to `sneaker_agent` if it detects shopping intent, so the compound request still reaches both agents, just in the right order.
+
+**Latency is the weakest dimension, and it is genuine.** `sneaker_agent` sends up to `MAX_CATALOG_SIZE` (80) catalog rows to Gemini and regularly takes 15–30s, which is what drags the score to 77%. The threshold is deliberately left at 15s rather than raised to make the number look better — the slow calls are real, and hiding them would defeat the point of measuring.
 
 See [test_cases.md](test_cases.md) for full test case documentation and edge case notes.
 
@@ -258,31 +277,7 @@ sneaker-agent/
 
 ## Architecture
 
-High-level end-to-end data flow:
-
-```
-Browser (React / Vite)
-    │  HTTP / SSE, session cookie
-    ▼
-FastAPI (api.py)
-  ├── /api/auth/*       → auth.py (password hashing) + database.py (session lookup)
-  ├── /api/agent        → LangGraph Agent Graph (below)
-  ├── /api/bid          → bid_agent.py (standalone, not part of the graph)
-  └── /api/sneakers, /api/users, /api/inventory → database.py + data/catalog.py
-
-LangGraph Agent Graph
-  orchestrator → sneaker_agent → critique_agent → logistics_agent
-                 inventory_agent ↗              ↺ retry (max 2)
-    │
-    ▼
-SQLite Database (database.py)
-  users · wardrobe_items · sneaker_inventory  (no budget/price ceiling anywhere)
-    │
-    ▼
-data/sneakerdata.json  —  1,668 sneakers · StockX market data
-```
-
-A diagrammed version of this flow — including the routing/retry loop and both side paths — is here: [Sneaker Agent Architecture](https://claude.ai/code/artifact/070023f9-56d4-4258-a81c-fee60be23445).
+A diagrammed version of the end-to-end data flow — including the routing/retry loop and both side paths — is here: [Sneaker Agent Architecture](https://claude.ai/code/artifact/070023f9-56d4-4258-a81c-fee60be23445).
 
 ---
 

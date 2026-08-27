@@ -8,8 +8,8 @@ Tables:
   wardrobe_items    — one row per sneaker per user (many-to-one → users)
   sneaker_inventory — one row per sneaker; quantity starts at 1 and decrements
                       when a sneaker is added to a wardrobe, making stock a
-                      live transactional concept. There is no price ceiling —
-                      any sneaker can be added regardless of cost.
+                      live transactional concept. No account balance is
+                      tracked, so any sneaker can be added regardless of cost.
 
 Using SQLite with check_same_thread=False so the sync agents running inside
 asyncio.to_thread can share the same engine without connection errors.
@@ -319,3 +319,28 @@ def purchase_sneaker(sneaker_name: str) -> bool:
         row.quantity -= 1
         row.updated_at = datetime.utcnow()
         return True
+
+
+def restock_sneaker(sneaker_name: str, quantity: int = 1) -> None:
+    """
+    restock_sneaker
+    ---------------
+    Sets a sneaker's inventory quantity directly. Used by the CLI and eval
+    test suites to guarantee a known-good stock level before testing bid/
+    purchase logic, since that logic's own correctness shouldn't depend on
+    whatever quantity a real user's prior purchases happened to leave
+    behind in the shared dev database.
+
+    Args:
+        sneaker_name (str): exact catalog name to restock
+        quantity     (int): units to set (default 1)
+
+    Returns:
+        None. No-ops silently if the sneaker isn't in the inventory table.
+    """
+    with get_session() as db:
+        row = db.query(SneakerInventory).filter_by(sneaker_name=sneaker_name).first()
+        if row is None:
+            return
+        row.quantity = quantity
+        row.updated_at = datetime.utcnow()

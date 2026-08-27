@@ -92,6 +92,69 @@ def check(condition, name, detail=""):
     return False
 
 
+def test_orchestrator_collection_routing():
+    """
+    test_orchestrator_collection_routing
+    --------------------------------------
+    Regression test for a real bug: the orchestrator's LLM routing call
+    consistently (5/5 runs, not flaky) sent a compound request — one that
+    both references the existing collection AND asks for new picks — to
+    sneaker_agent, skipping inventory_agent entirely. Its prompt calls
+    sneaker_agent "the default for anything sneaker-related," which biases
+    it away from inventory_agent whenever shopping language is present at
+    all, and it has no rule for handling both intents in one message.
+
+    _mentions_existing_collection() closes this deterministically: matching
+    text routes straight to inventory_agent without an LLM call, and
+    inventory_agent's own downstream check hands off to sneaker_agent if it
+    detects shopping intent too — so a compound request still reaches
+    sneaker_agent, just via inventory_agent first.
+
+    Pure function — no LLM calls, so this covers the routing decision
+    without depending on live model output.
+
+    Returns:
+        None. Records one result per assertion.
+    """
+    print("\nOrchestrator collection routing (deterministic pre-check)")
+    from orchestrator import _mentions_existing_collection
+
+    # Collection references — including the exact TC-003 regression input —
+    # must all route to inventory_agent regardless of shopping language
+    # also present in the same message.
+    collection_cases = [
+        "I want to upgrade my sneaker collection. What do I already own, "
+        "and what new heat can I cop to complete the rotation?",
+        "What sneakers do I already have in my collection?",
+        "What do I own?",
+        "what is in my collection",
+        "see my collection",
+        "check my current collection",
+    ]
+    for text in collection_cases:
+        check(
+            _mentions_existing_collection(text) is True,
+            f"detects a collection reference in {text[:50]!r}...",
+        )
+
+    # Pure shopping requests that happen to use the word "collection" as
+    # their target ("add to my collection") must NOT trigger this — they
+    # are not asking what's already owned.
+    shopping_cases = [
+        "Help me find some fresh kicks to add to my collection",
+        "I want to buy some new heat for my collection",
+        "give me a new addition to my collection please",
+        "What are the hottest sneaker styles and trends right now?",
+        "Is the Jordan 4 Retro Infrared available in the store right now?",
+        "sneakers",
+    ]
+    for text in shopping_cases:
+        check(
+            _mentions_existing_collection(text) is False,
+            f"does not false-positive on {text[:50]!r}...",
+        )
+
+
 def test_reasoning_parser():
     """
     test_reasoning_parser
@@ -452,14 +515,358 @@ def test_bid_validation():
     )
 
 
+def test_query_understanding():
+    """
+    test_query_understanding
+    -------------------------
+    Pure-function tests for the free-text constraint extractors in
+    agents/selection.py — the layer that reads brand, color, silhouette,
+    price ceiling, release year and sort preference out of a sentence.
+
+    These exist because a constraint can reach the agent two ways: as a
+    structured field from the Advisor UI's filter chips, or named in prose
+    ("a low top jordan under $150") from the free-text box, the admin
+    Custom Scenario panel, or the CLI. Only the structured path used to be
+    honored, so a brand named in prose was dropped — and the prompt then
+    told the LLM to favor brand variety, steering it away from what the user
+    actually asked for.
+
+    Covers the realistic ways a shopper phrases a request, plus the
+    false-positive traps that a naive number/keyword grab would fall into.
+
+    No LLM or database calls — fast and fully deterministic.
+
+    Returns:
+        None. Records one result per assertion.
+    """
+    print("\nQuery understanding (free-text constraint extraction)")
+    from agents.selection import (
+        extract_requested_brands, extract_requested_colors, extract_profile,
+        extract_max_price, extract_min_release_year, extract_sort_preference,
+    )
+
+    # A stand-in brand vocabulary; the real call passes the catalog's brands.
+    brands = {"Jordan", "Nike", "adidas", "New Balance", "ASICS"}
+
+    # ── Brand ────────────────────────────────────────────────────────────
+    check(
+        extract_requested_brands("get me a low top jordan", brands) == ["Jordan"],
+        "extract_requested_brands: finds a brand named in prose",
+    )
+    check(
+        extract_requested_brands("give me 3 pairs of grey jordans", brands) == ["Jordan"],
+        "extract_requested_brands: matches a plural brand mention (jordans)",
+    )
+    check(
+        extract_requested_brands("jordan's are my favorite", brands) == ["Jordan"],
+        "extract_requested_brands: matches a possessive brand mention (jordan's)",
+    )
+    check(
+        extract_requested_brands("what's the cheapest new balance", brands) == ["New Balance"],
+        "extract_requested_brands: matches a multi-word brand as a phrase",
+    )
+    check(
+        extract_requested_brands("no jordans please, show me something else", brands) == [],
+        "extract_requested_brands: a negated brand ('no jordans') is not treated as a filter",
+    )
+    check(
+        extract_requested_brands("anything but adidas", brands) == [],
+        "extract_requested_brands: 'anything but <brand>' is not treated as a filter",
+    )
+    check(
+        extract_requested_brands("I already own nikes, what else should I get", brands) == [],
+        "extract_requested_brands: 'I already own <brand>' is not treated as a filter",
+    )
+    check(
+        extract_requested_brands("just show me some sneakers", brands) == [],
+        "extract_requested_brands: no brand mentioned returns empty",
+    )
+
+    # ── Color and silhouette ─────────────────────────────────────────────
+    check(
+        extract_requested_colors("red and black colorway") == ["black", "red"],
+        "extract_requested_colors: finds multiple colors in one request",
+    )
+    check(
+        extract_profile("I want low tops") == "low",
+        "extract_profile: 'low tops' resolves to low",
+    )
+    check(
+        extract_profile("high-top basketball shoes") == "high",
+        "extract_profile: hyphenated 'high-top' resolves to high",
+    )
+    check(
+        extract_profile("something comfortable") is None,
+        "extract_profile: no silhouette mentioned returns None",
+    )
+
+    # ── Price ceiling ────────────────────────────────────────────────────
+    price_cases = [
+        ("a jordan I can get with 150 dollars", 150.0),
+        ("cheap nikes under 100",               100.0),
+        ("nothing over $200",                   200.0),
+        ("300 dollars max",                     300.0),
+        ("I have 250 bucks to spend",           250.0),
+        ("budget of 300",                       300.0),
+        ("$180 or less",                        180.0),
+    ]
+    for text, expected in price_cases:
+        check(
+            extract_max_price(text) == expected,
+            f"extract_max_price: parses a ceiling from {text!r}",
+            f"got {extract_max_price(text)}, expected {expected}",
+        )
+
+    check(
+        extract_max_price("sneakers with 3 stripes") is None,
+        "extract_max_price: a bare number with no currency marker is not a budget "
+        "('3 stripes' must not parse as $3)",
+        f"got {extract_max_price('sneakers with 3 stripes')}",
+    )
+    check(
+        extract_max_price("size 10 low tops") is None,
+        "extract_max_price: a shoe size is not mistaken for a budget",
+        f"got {extract_max_price('size 10 low tops')}",
+    )
+
+    # ── Release year ─────────────────────────────────────────────────────
+    check(
+        extract_min_release_year("jordans released after 2022") == 2022,
+        "extract_min_release_year: parses 'after <year>'",
+    )
+    check(
+        extract_min_release_year("new balance releases from 2023 onwards") == 2023,
+        "extract_min_release_year: parses 'from <year> onwards'",
+    )
+    check(
+        extract_min_release_year("something classic") is None,
+        "extract_min_release_year: no year mentioned returns None",
+    )
+
+    # ── Sort preference ──────────────────────────────────────────────────
+    check(
+        extract_sort_preference("the most expensive adidas") == "retail_desc",
+        "extract_sort_preference: 'most expensive' sorts by retail descending",
+    )
+    check(
+        extract_sort_preference("highest retail value jordan") == "retail_desc",
+        "extract_sort_preference: 'highest retail value' sorts by retail descending",
+    )
+    check(
+        extract_sort_preference("the cheapest new balance") == "retail_asc",
+        "extract_sort_preference: 'cheapest' sorts by retail ascending",
+    )
+    check(
+        extract_sort_preference("300 dollars max") is None,
+        "extract_sort_preference: a price ceiling ('300 dollars max') is not a "
+        "request for the most expensive shoe",
+        f"got {extract_sort_preference('300 dollars max')}",
+    )
+    check(
+        extract_sort_preference("find me some sneakers") is None,
+        "extract_sort_preference: an open-ended request keeps the default popularity order",
+    )
+
+
+def test_constraint_filters():
+    """
+    test_constraint_filters
+    ------------------------
+    Pure-function tests for the deterministic filters that apply the
+    extracted constraints to the candidate pool, plus the ordering step.
+
+    The ordering test matters more than it looks: the pool is capped at
+    MAX_CATALOG_SIZE before the LLM sees it, so if a superlative query
+    isn't re-sorted first, the correct answer can sit outside the window
+    and never reach the model at all.
+
+    No LLM or database calls — fast and fully deterministic.
+
+    Returns:
+        None. Records one result per assertion.
+    """
+    print("\nConstraint filters (profile, price, release year, ordering)")
+    from agents.selection import (
+        filter_by_profile, filter_by_max_price, filter_by_release_year,
+        sort_candidates,
+    )
+
+    candidates = [
+        ("Cheap Low",   {"profile": "low",  "retail_price": 90.0,   "release_date": "2021-05-01", "sales_this_period": 500}),
+        ("Mid Range",   {"profile": "low",  "retail_price": 150.0,  "release_date": "2023-01-15", "sales_this_period": 100}),
+        ("Pricey High", {"profile": "high", "retail_price": 1110.0, "release_date": "2022-06-22", "sales_this_period": 5}),
+        ("No Date",     {"profile": "low",  "retail_price": 120.0,                                 "sales_this_period": 50}),
+        # 10 real catalog entries carry retail_price 0.0, meaning unknown.
+        ("Unknown Price", {"profile": "low", "retail_price": 0.0,   "release_date": "2023-04-01", "sales_this_period": 10}),
+    ]
+
+    # ── filter_by_profile ────────────────────────────────────────────────
+    check(
+        filter_by_profile(candidates, None) == candidates,
+        "filter_by_profile: no profile requested returns candidates unchanged",
+    )
+    names = [n for n, _ in filter_by_profile(candidates, "high")]
+    check(
+        names == ["Pricey High"],
+        "filter_by_profile: filters to only the requested silhouette",
+        f"got {names}",
+    )
+    check(
+        filter_by_profile(candidates, "mid") == [],
+        "filter_by_profile: a silhouette with zero matches returns empty, never a substitute",
+    )
+
+    # ── filter_by_max_price ──────────────────────────────────────────────
+    names = [n for n, _ in filter_by_max_price(candidates, 150.0)]
+    check(
+        names == ["Cheap Low", "Mid Range", "No Date"],
+        "filter_by_max_price: keeps items at or under the ceiling (inclusive)",
+        f"got {names}",
+    )
+    check(
+        filter_by_max_price(candidates, None) == candidates,
+        "filter_by_max_price: no ceiling returns candidates unchanged",
+    )
+    check(
+        filter_by_max_price(candidates, 10.0) == [],
+        "filter_by_max_price: an unreachable ceiling returns empty rather than the cheapest anyway",
+        f"got {[n for n, _ in filter_by_max_price(candidates, 10.0)]}",
+    )
+    names = [n for n, _ in filter_by_max_price(candidates, 200.0)]
+    check(
+        "Unknown Price" not in names,
+        "filter_by_max_price: retail_price 0 means unknown, not free — it must not "
+        "satisfy an arbitrary ceiling",
+        f"got {names}",
+    )
+
+    # ── filter_by_release_year ───────────────────────────────────────────
+    names = [n for n, _ in filter_by_release_year(candidates, 2022)]
+    check(
+        names == ["Mid Range", "Pricey High", "Unknown Price"],
+        "filter_by_release_year: keeps only items released in or after the given year",
+        f"got {names}",
+    )
+    check(
+        "No Date" not in names,
+        "filter_by_release_year: an item with no release date is excluded, not assumed to match",
+    )
+
+    # ── sort_candidates ──────────────────────────────────────────────────
+    names = [n for n, _ in sort_candidates(candidates, "retail_desc")]
+    check(
+        names[0] == "Pricey High",
+        "sort_candidates: retail_desc puts the highest retail price first",
+        f"got {names}",
+    )
+    names = [n for n, _ in sort_candidates(candidates, "retail_asc")]
+    check(
+        names[0] == "Cheap Low",
+        "sort_candidates: retail_asc puts the lowest retail price first",
+        f"got {names}",
+    )
+    check(
+        names[-1] == "Unknown Price",
+        "sort_candidates: retail_asc sorts an unknown price (0) last, so "
+        "'the cheapest' is never an item whose price nobody knows",
+        f"got {names}",
+    )
+    names = [n for n, _ in sort_candidates(candidates, None)]
+    check(
+        names[0] == "Cheap Low",
+        "sort_candidates: default orders by popularity (sales_this_period)",
+        f"got {names}",
+    )
+    original = list(candidates)
+    sort_candidates(candidates, "retail_desc")
+    check(
+        candidates == original,
+        "sort_candidates: does not mutate the caller's list",
+    )
+
+
+def test_availability_report():
+    """
+    test_availability_report
+    -------------------------
+    Tests the plain-text shaping of logistics_agent's availability report.
+
+    The agent emits its report in two shapes: structured rows the web UI
+    renders as a table, and this text version for the CLI and eval report,
+    which have no table to render into. Neither includes the raw StockX URL.
+
+    Pure function — no LLM or database calls.
+
+    Returns:
+        None. Records one result per assertion.
+    """
+    print("\nAvailability report (plain-text shaping)")
+    from agents.logistics_agent import _format_report_text
+
+    rows = [
+        {"name": "Jordan 4 Retro SB Pine Green", "brand": "Jordan", "in_stock": True,
+         "quantity": 2, "retail": 225.0, "market": 388.0,
+         "link": "https://stockx.com/jordan-4-retro-sb-pine-green", "found": True},
+        {"name": "Nike Dunk Low", "brand": "Nike", "in_stock": False,
+         "quantity": 0, "retail": 110.0, "market": 96.0,
+         "link": "https://stockx.com/nike-dunk-low", "found": True},
+        {"name": "Not A Real Shoe", "brand": "", "in_stock": False,
+         "quantity": 0, "retail": None, "market": None, "link": None, "found": False},
+    ]
+
+    text = _format_report_text(rows, 335.0)
+
+    check(
+        "stockx.com" not in text,
+        "report text omits the raw StockX URL",
+        f"got: {text!r}",
+    )
+    check(
+        "IN STOCK (2)" in text and "OUT OF STOCK" in text,
+        "report text shows live stock status per row",
+        f"got: {text!r}",
+    )
+    check(
+        "not found in catalog" in text,
+        "an unknown sneaker is reported rather than silently dropped",
+        f"got: {text!r}",
+    )
+    check(
+        "$335.00" in text,
+        "report text includes the estimated retail total",
+        f"got: {text!r}",
+    )
+
+    # Column alignment: every data row should start its brand column at the
+    # same offset, which is what makes the report readable in a terminal.
+    data_lines = [
+        line for line in text.split("\n")
+        if "IN STOCK" in line or "OUT OF STOCK" in line
+    ]
+    # The "retail $" marker is unambiguous (it appears once per row), so its
+    # column offset is a clean way to prove the columns line up.
+    offsets = [line.index("retail $") for line in data_lines]
+    check(
+        len(set(offsets)) == 1,
+        "columns align across rows regardless of sneaker name length",
+        f"retail column offsets: {offsets}",
+    )
+
+    check(
+        _format_report_text([], 0.0) == "No sneakers to check availability for.",
+        "an empty row list produces a readable message rather than an empty report",
+    )
+
+
 def test_full_pipeline():
     """
     test_full_pipeline
     ------------------
     Runs the complete multi-agent graph for a buying request and confirms
     that every node emits reasoning and the sneaker agent proposes picks.
-    There is no budget in this app, so there's nothing to check picks
-    against on that front — any in-stock sneaker is a valid candidate.
+    This query states no price ceiling, so any in-stock sneaker is a valid
+    candidate. Constraint handling is covered by test_query_understanding
+    and test_constraint_filters.
 
     Skipped when no real GOOGLE_API_KEY is configured, since it makes live
     Gemini calls.
@@ -534,10 +941,14 @@ def test_bid_fairness_judgment():
         return
 
     from data.catalog import SNEAKER_CATALOG
-    from database import get_out_of_stock_names
+    from database import get_out_of_stock_names, restock_sneaker
     from agents.bid_agent import evaluate_bid
 
     sneaker = "Jordan 4 Retro SB Pine Green"
+    # This test checks fairness judgment, not real inventory — restock so
+    # the result doesn't depend on whatever a prior manual purchase left
+    # this sneaker's quantity at in the shared dev database.
+    restock_sneaker(sneaker, quantity=1)
     out_of_stock = get_out_of_stock_names()
     # Real data for this sneaker: retail $225, market $388, lowest ask $325.
 
@@ -654,12 +1065,16 @@ def main():
     else:
         print("No GOOGLE_API_KEY — live pipeline test will be skipped.")
 
+    test_orchestrator_collection_routing()
     test_reasoning_parser()
     test_catalog_filter()
     test_user_routes()
     test_database_helpers()
     test_selection_logic()
     test_bid_validation()
+    test_query_understanding()
+    test_constraint_filters()
+    test_availability_report()
     test_full_pipeline()
     test_bid_fairness_judgment()
     test_brand_and_count_compliance()

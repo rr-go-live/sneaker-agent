@@ -9,25 +9,31 @@ working correctly end-to-end.
 
 HOW THE EVAL WORKS
 ------------------
-For each test case the runner:
-  1. Sends the input through the full LangGraph agent graph
-  2. Captures which nodes ran, in what order, and how long each took
-  3. Runs up to 4 scorers against the result:
+Each test case has a "kind": "graph" (default) sends the input through the
+full LangGraph agent graph; "bid" calls bid_agent.evaluate_bid() directly,
+since bidding targets one already-known sneaker rather than a routing
+decision. For each case the runner:
+  1. Runs the case (graph stream, or a direct bid_agent call)
+  2. Captures which nodes ran (or ["bid_agent"]), in what order, and how long each took
+  3. Runs up to 6 scorers against the result:
 
-     Routing Accuracy    — did the orchestrator pick the right first agent?
-     Sneaker Validity    — are all proposed sneakers real catalog items (no hallucination)?
+     Routing Accuracy    — did the orchestrator pick the right first agent? (graph)
+     Sneaker Validity    — are all proposed sneakers real catalog items (no hallucination)? (graph)
+     Expected Pick       — did one specific correct catalog item actually appear in the picks? (graph)
+     Bid Fairness        — did bid_agent accept/reject in line with real market data? (bid)
      Failure Handling    — does the system fail gracefully when something goes wrong?
      Latency             — did the full run finish within the acceptable time window?
 
   4. Averages all applicable scores into a per-case overall score
   5. Aggregates scores per dimension across all cases for the final report
 
-  There is no budget concept in this app, so there's no budget-related
-  scoring dimension.
+  There is no account-budget concept, so nothing scores "can the user
+  afford this". A price ceiling the shopper states themselves is scored
+  under Constraint Fidelity, alongside brand and silhouette.
 
 USAGE
 -----
-  python eval_runner.py                 # run all 7 test cases
+  python eval_runner.py                 # run all 11 test cases
   python eval_runner.py --id TC-001     # run one specific test case
   python eval_runner.py --verbose       # show agent logs during runs
 """

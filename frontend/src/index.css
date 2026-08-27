@@ -1591,20 +1591,125 @@ input, textarea, select {
 }
 
 /* ─────────────────────────────────────────────
-   Eval Dashboard
+   Eval Dashboard — admin instrument panel
+   Deliberately reads as an instrument panel rather than a storefront:
+   a dark command bar, monospace tabular figures for every number, and
+   the agent graph itself as the centerpiece.
    ───────────────────────────────────────────── */
 
-.eval-run-row {
-  display: flex;
+/* Command bar — verdict, live metrics, run controls */
+.eval-command {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 28px;
+  gap: 32px;
+  background: var(--dark);
+  color: var(--text-light);
+  border-radius: 14px;
+  padding: 26px 30px;
+  margin: 8px 0 20px;
 }
+
+.eval-command-eyebrow {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--olive);
+  margin-bottom: 8px;
+}
+
+.eval-verdict {
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  margin: 0;
+}
+
+.eval-command-sub {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.62);
+  margin-top: 8px;
+  max-width: 46ch;
+}
+
+.eval-command-metrics {
+  display: flex;
+  gap: 28px;
+}
+
+.eval-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: right;
+}
+
+.eval-metric-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 24px;
+  font-weight: 500;
+  color: var(--text-light);
+}
+
+.eval-metric-label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.eval-command-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.eval-run-btn {
+  height: 44px;
+  padding: 0 26px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--sage);
+  color: #2C3038;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s var(--ease), opacity 0.15s var(--ease);
+}
+
+.eval-run-btn:hover:not(:disabled) { background: #B0C6B8; }
+.eval-run-btn:disabled             { opacity: 0.45; cursor: not-allowed; }
+
+.eval-run-btn.secondary {
+  background: var(--dark);
+  color: var(--text-light);
+}
+
+.eval-run-btn.secondary:hover:not(:disabled) { background: #565C66; }
 
 .eval-progress-label {
   font-family: var(--font-mono);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.eval-error-banner {
+  background: #FBF0F0;
+  border: 1px solid #E4C9C9;
+  border-radius: var(--radius-md);
+  color: #9E4040;
   font-size: 13px;
-  color: var(--text-muted);
+  padding: 12px 16px;
+  margin-bottom: 24px;
 }
 
 /* Admin custom scenario panel */
@@ -1613,7 +1718,7 @@ input, textarea, select {
   border-radius: var(--radius-lg);
   background: #FBFAF3;
   padding: 18px 20px;
-  margin-bottom: 32px;
+  margin-bottom: 28px;
 }
 
 .eval-scenario-label {
@@ -1631,85 +1736,237 @@ input, textarea, select {
   margin-top: 10px;
 }
 
-.eval-scenario-row .picker-input {
-  flex: 1;
-}
+.eval-scenario-row .picker-input { flex: 1; }
 
-/* Summary card */
-.eval-summary-card {
+/* Shared panel chrome */
+.pipe-panel,
+.lat-panel,
+.dim-panel {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 14px;
-  padding: 24px 28px;
-  margin-bottom: 32px;
+  padding: 22px 24px;
+  margin-bottom: 20px;
 }
 
-.eval-summary-header {
-  display: flex;
-  gap: 40px;
-  margin-bottom: 24px;
-}
+.pipe-panel-head { margin-bottom: 18px; }
 
-.eval-summary-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.eval-summary-value {
-  font-size: 32px;
-  font-weight: 700;
-  letter-spacing: -1px;
+.pipe-panel-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
+  margin: 0;
 }
 
-.eval-summary-label {
+.pipe-panel-sub {
   font-size: 12px;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  margin-top: 4px;
 }
 
-/* Dimension bars */
-.eval-dimensions {
+/* Signature: the agent graph carrying live telemetry */
+.pipe-flow {
   display: flex;
-  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.pipe-flow-item {
+  display: flex;
+  align-items: center;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.pipe-arrow {
+  color: var(--stone);
+  font-size: 15px;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.pipe-node {
+  flex: 1 1 0;
+  min-width: 132px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  padding: 12px 13px;
+}
+
+.pipe-node.detached {
+  border-style: dashed;
+  max-width: 220px;
+}
+
+.pipe-node-name {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pipe-node-mean {
+  display: block;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 20px;
+  font-weight: 500;
+  margin: 4px 0 8px;
+}
+
+.pipe-share-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.pipe-share-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.6s var(--ease);
+}
+
+.pipe-node-meta {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.pipe-detached {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border);
+}
+
+.pipe-detached-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+/* Dimension score cards */
+.dim-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 14px;
 }
 
-.eval-dimension-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.dim-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  padding: 14px 15px;
 }
 
-.eval-dim-header {
+.dim-card-top {
   display: flex;
   align-items: baseline;
+  justify-content: space-between;
   gap: 10px;
+  margin-bottom: 8px;
 }
 
-.eval-dim-label {
+.dim-card-label {
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
-  min-width: 150px;
 }
 
-.eval-dim-desc {
-  font-size: 12px;
-  color: var(--text-muted);
-  flex: 1;
-}
-
-.eval-dim-score {
-  font-size: 12px;
+.dim-card-score {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
   font-weight: 600;
+}
+
+.dim-card-desc {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  margin-top: 9px;
+}
+
+.dim-card-count {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* Runtime-by-case chart */
+.lat-chart {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  /* Width of the non-track columns, so the threshold line can be placed
+     relative to the bar tracks rather than the full row. */
+  --lat-left:  72px;   /* id column + gap */
+  --lat-right: 62px;   /* value column + gap */
+}
+
+.lat-threshold {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed var(--stone);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.lat-row {
+  display: grid;
+  grid-template-columns: 62px 1fr 52px;
+  align-items: center;
+  gap: 10px;
+}
+
+.lat-row-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.lat-row-track {
+  height: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.lat-row-fill {
+  height: 100%;
+  transition: width 0.5s var(--ease);
+}
+
+.lat-row-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  text-align: right;
 }
 
 .eval-bar-track {
   height: 6px;
-  background: var(--bg);
+  background: var(--bg-card);
   border-radius: 3px;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -1721,14 +1978,35 @@ input, textarea, select {
   transition: width 0.6s ease;
 }
 
-/* Section title */
-.eval-section-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin: 0 0 16px 0;
+/* Keyboard focus — visible on every interactive control in the dashboard */
+.eval-run-btn:focus-visible,
+.eval-case-header:focus-visible {
+  outline: 2px solid var(--sage);
+  outline-offset: 2px;
+}
+
+@media (max-width: 860px) {
+  .eval-command {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  .eval-command-metrics { gap: 22px; }
+  .eval-metric          { text-align: left; }
+  .eval-command-actions {
+    align-items: stretch;
+    flex-direction: row;
+    justify-content: space-between;
+  }
+  .eval-verdict         { font-size: 27px; }
+  .eval-scenario-row    { flex-direction: column; }
+  .lat-row              { grid-template-columns: 54px 1fr 46px; }
+  .lat-chart            { --lat-left: 64px; --lat-right: 56px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pipe-share-fill,
+  .lat-row-fill,
+  .eval-bar-fill { transition: none; }
 }
 
 /* Case list */
@@ -1977,6 +2255,132 @@ input, textarea, select {
   line-height: 1.55;
   margin: 0;
   white-space: pre-wrap;
+}
+
+/* Availability table — logistics_agent's stock rows */
+.avail-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Wide tables scroll inside their own container so the page body never does */
+.avail-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
+.avail-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.avail-table th {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  text-align: left;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.avail-table td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  vertical-align: middle;
+}
+
+.avail-table tbody tr:last-child td { border-bottom: none; }
+.avail-table tbody tr:hover         { background: var(--bg); }
+
+/* Numeric columns are monospace and right-aligned so the decimal points
+   line up down the column and prices stay scannable. */
+.avail-table .num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.avail-name {
+  font-weight: 500;
+  min-width: 190px;
+}
+
+.avail-brand {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.avail-stock {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+
+.avail-stock.in      { background: #E8F0EA; color: #3B6B53; }
+.avail-stock.out     { background: #F6ECEC; color: #9E4040; }
+.avail-stock.unknown { background: var(--bg); color: var(--text-muted); }
+
+/* Market above retail means the pick appreciates — worth surfacing, since
+   that is exactly what critique_agent judges picks on. */
+.avail-up { color: #3B6B53; }
+
+.avail-link {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  border-bottom: 1px solid transparent;
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.avail-link:hover {
+  color: var(--text);
+  border-bottom-color: var(--stone);
+}
+
+.avail-link:focus-visible {
+  outline: 2px solid var(--sage);
+  outline-offset: 2px;
+}
+
+.avail-table tfoot td {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  border-bottom: none;
+  background: var(--bg);
+}
+
+.avail-table tfoot .num {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Visually hidden but available to screen readers */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .eval-error-text {

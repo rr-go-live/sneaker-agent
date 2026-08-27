@@ -26,9 +26,11 @@ def critique_agent(state):
                 (sneaker_agent already hard-filters for this — this is a
                 defense-in-depth safety net, not the primary enforcement)
 
-    There is no budget check — the app has no price ceiling. Retail/market
-    price still flows through to the user as reference data (via
-    logistics_agent), it just isn't a pass/fail criterion here.
+    There is no budget check here. Any price ceiling the shopper stated was
+    already applied deterministically by sneaker_agent's filters, so the pool
+    cannot contain a violation and re-checking would be redundant. Retail and
+    market price still flow through to the user as reference data (via
+    logistics_agent); they just aren't a pass/fail criterion at this step.
 
     If both deterministic checks pass, two rubrics are evaluated by the LLM:
       1. Value           — at least one pick should have market_value > retail
@@ -67,6 +69,24 @@ def critique_agent(state):
             "reasoning": (
                 f"Reached the maximum of {MAX_CRITIQUE_ATTEMPTS} review cycles, "
                 "so I'm approving the current picks to avoid an endless retry loop."
+            ),
+        }
+
+    # An empty pool because nothing in the catalog satisfies the request is
+    # not a failed selection — it is the correct answer. Retrying would burn
+    # two more LLM cycles and end by replacing sneaker_agent's specific
+    # explanation with a generic "picks approved", so pass it straight
+    # through with the reason intact.
+    if state.get("no_matches"):
+        return {
+            "critique_attempts": attempts,
+            "critique_feedback": None,
+            "output": state.get("output") or "No sneakers matched the request.",
+            "next":   "logistics_agent",
+            "reasoning": (
+                "The catalog holds nothing matching the stated constraints, so "
+                "there is nothing to critique and a retry cannot help. Passing "
+                "the explanation through unchanged."
             ),
         }
 
